@@ -1,6 +1,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "../../include/forces.cuh"
+#include "../../../include/forces.cuh"
 
 #define BLOCK_SIZE 256
 
@@ -50,7 +50,7 @@ __global__ void manifold_step_kernel(
     float M = compute_plasticity_scale(s_buf_energy, s_v, dim, tid, plasticity);
     
     // 2. Christoffel
-    compute_christoffel_force(s_gamma, s_v, s_x, U, W, s_h, dim, rank, tid, topology, M, R_val, r_val);
+    compute_christoffel_force(s_gamma, s_v, s_x, U, W, s_h, dim, rank, tid, topology, M, R_val, r_val, 0.01f, 50.0f);
     __syncthreads();
     
     const float eff_dt = dt * dt_scale;

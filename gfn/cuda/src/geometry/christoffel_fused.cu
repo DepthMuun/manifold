@@ -48,7 +48,9 @@ __global__ void christoffel_fused_kernel(
         topology,
         M,
         R_val,
-        r_val
+        r_val,
+        0.01f,
+        50.0f
     );
 }
 

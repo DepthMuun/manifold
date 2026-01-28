@@ -1,14 +1,12 @@
 
-#include "../../include/christoffel_impl.cuh"
+#include "../../../include/christoffel_impl.cuh"
 
 #define BLOCK_SIZE 256
 
-// Omelyan Coefficients
-#define OM_XI 0.1786178958448091f
-#define OM_LAMBDA -0.2123418310626054f
-#define OM_CHI -0.06626458266981849f
+// Forest-Ruth Coefficients
+#define FR_THETA 1.3512071919596578f
 
-__global__ void omelyan_fused_kernel(
+__global__ void forest_ruth_fused_kernel(
     const float* __restrict__ x_in,
     const float* __restrict__ v_in,
     const float* __restrict__ f,
@@ -53,48 +51,45 @@ __global__ void omelyan_fused_kernel(
     }
     __syncthreads();
 
-    float scale = (dt_scale_tensor) ? dt_scale_tensor[b] : dt_scale_scalar;
-    float h = dt * scale;
+    float scale = (dt_scale_tensor != nullptr) ? dt_scale_tensor[b] : dt_scale_scalar;
+    float h_dt = dt * scale;
 
     for (int s = 0; s < steps; s++) {
-        // Step 1
-        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += OM_XI * h * s_v[i];
+        // Stage 1
+        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += FR_THETA * 0.5f * h_dt * s_v[i];
         __syncthreads();
         christoffel_device(s_v, U, W, s_gamma, s_x, V_w, dim, rank, plasticity, sing_thresh, sing_strength, use_active, topology, s_h, s_E, s_P, s_M, R_val, r_val);
         __syncthreads();
         for (int i = tid; i < dim; i += blockDim.x) {
-             float f_v = (f) ? f[b * dim + i] : 0.0f;
-             s_v[i] += 0.5f * (1.0f - 2.0f * OM_LAMBDA) * h * (f_v - s_gamma[i]);
+            float f_v = (f) ? f[b * dim + i] : 0.0f;
+            s_v[i] += FR_THETA * h_dt * (f_v - s_gamma[i]);
         }
         __syncthreads();
 
-        // Step 2
-        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += OM_CHI * h * s_v[i];
+        // Stage 2
+        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += (1.0f - FR_THETA) * 0.5f * h_dt * s_v[i];
         __syncthreads();
         christoffel_device(s_v, U, W, s_gamma, s_x, V_w, dim, rank, plasticity, sing_thresh, sing_strength, use_active, topology, s_h, s_E, s_P, s_M, R_val, r_val);
         __syncthreads();
         for (int i = tid; i < dim; i += blockDim.x) {
-             float f_v = (f) ? f[b * dim + i] : 0.0f;
-             s_v[i] += OM_LAMBDA * h * (f_v - s_gamma[i]);
+            float f_v = (f) ? f[b * dim + i] : 0.0f;
+            s_v[i] += (1.0f - 2.0f * FR_THETA) * h_dt * (f_v - s_gamma[i]);
         }
         __syncthreads();
 
-        // Step 3 (Center)
-        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += (1.0f - 2.0f * (OM_CHI + OM_XI)) * h * s_v[i];
+        // Stage 3
+        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += (1.0f - FR_THETA) * 0.5f * h_dt * s_v[i];
         __syncthreads();
         christoffel_device(s_v, U, W, s_gamma, s_x, V_w, dim, rank, plasticity, sing_thresh, sing_strength, use_active, topology, s_h, s_E, s_P, s_M, R_val, r_val);
         __syncthreads();
         for (int i = tid; i < dim; i += blockDim.x) {
-             float f_v = (f) ? f[b * dim + i] : 0.0f;
-             s_v[i] += OM_LAMBDA * h * (f_v - s_gamma[i]);
+            float f_v = (f) ? f[b * dim + i] : 0.0f;
+            s_v[i] += FR_THETA * h_dt * (f_v - s_gamma[i]);
         }
         __syncthreads();
 
-        // Symmetrize
-        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += OM_CHI * h * s_v[i];
-        __syncthreads();
-        // ... omitted more redundant force updates for brevity, Omelyan is complex ...
-        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += OM_XI * h * s_v[i];
+        // Final Pos
+        for (int i = tid; i < dim; i += blockDim.x) s_x[i] += FR_THETA * 0.5f * h_dt * s_v[i];
         __syncthreads();
     }
 
@@ -104,7 +99,7 @@ __global__ void omelyan_fused_kernel(
     }
 }
 
-extern "C" void launch_omelyan_fused(
+extern "C" void launch_forest_ruth_fused(
     const float* x, const float* v, const float* f,
     const float* U, const float* W, const float* V_w,
     float* x_new, float* v_new,
@@ -117,7 +112,7 @@ extern "C" void launch_omelyan_fused(
     cudaStream_t stream
 ) {
     int shared = (3 * dim + rank + 16) * sizeof(float) + 2 * sizeof(double);
-    omelyan_fused_kernel<<<batch, BLOCK_SIZE, shared, stream>>>(
+    forest_ruth_fused_kernel<<<batch, BLOCK_SIZE, shared, stream>>>(
         x, v, f, U, W, V_w, x_new, v_new, dt, dt_scale_scalar, dt_scale_tensor,
         batch, dim, rank, plasticity, sing_thresh, sing_strength, use_active, steps, topology, R_val, r_val
     );

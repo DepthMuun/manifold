@@ -138,6 +138,37 @@ class Manifold(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             nn.init.zeros_(module.bias)
             nn.init.ones_(module.weight)
+
+    def _create_dummy_tensor(self, shape, device, dtype=None, eps=1e-8, max_dim=10000):
+        """
+        Create a dummy tensor with verified dimensions to prevent memory issues.
+        
+        Args:
+            shape: Tuple of dimensions
+            device: Target device
+            dtype: Tensor dtype (defaults to torch.float32)
+            eps: Small value to prevent exact zeros
+            max_dim: Maximum allowed dimension size
+            
+        Returns:
+            Dummy tensor with verified dimensions
+        """
+        if dtype is None:
+            dtype = torch.float32
+            
+        # Verify dimensions are reasonable
+        verified_shape = []
+        for dim in shape:
+            if dim <= 0:
+                verified_shape.append(1)  # Minimum dimension
+            elif dim > max_dim:
+                verified_shape.append(max_dim)  # Cap large dimensions
+            else:
+                verified_shape.append(dim)
+        
+        # Create tensor with small random values to prevent gradient explosion
+        tensor = torch.randn(verified_shape, device=device, dtype=dtype) * eps
+        return tensor
     
     def forward(self, input_ids=None, attention_mask=None, state=None, force_manual=None, collect_christ=False):
         """
@@ -193,213 +224,208 @@ class Manifold(nn.Module):
             else:
                 mask = torch.ones(batch_size, seq_len, 1, device=all_forces.device)
             
-            logits_list = []
-            all_christoffels = []
-            
-            context = None
-            
-            # Torus uses Python loop to keep gradients stable with current CUDA backward
             topo_cfg = self.physics_config.get('topology', {})
             topology_type = topo_cfg.get('type', 'euclidean')
             is_torus = (topology_type == 'torus')
             
-            # Disable recurrent fusion for Leapfrog (different stepping scheme)
-            can_fuse = (not self.use_scan and self.depth > 0 and not collect_christ and self.integrator_type != 'leapfrog')
+            from gfn.cuda.ops import CUDA_AVAILABLE
             
-            if can_fuse:
-                try:
-                    from gfn.cuda.ops import recurrent_manifold_fused, CUDA_AVAILABLE
-                    if CUDA_AVAILABLE:
-                        # Stack per-head parameters across layers
-                        U_list = []
-                        W_list = []
-                        # Clutch gate stacks
-                        W_forget_list = []
-                        W_input_list = []
-                        b_forget_list = []
-                        
-                        # Singularity gate stacks
-                        W_potential_list = []
-                        b_potential_list = []
-                        
-                        for layer in self.layers:
-                                # Handle fractal wrapper
-                            target_layer = layer
-                            if hasattr(layer, 'macro_manifold'):
-                                target_layer = layer.macro_manifold
-                                
-                            for head_idx in range(self.heads):
-                                head_geo = target_layer.christoffels[head_idx]
-                                
-                                # Non-torus uses U/W matrices
-                                if not is_torus:
-                                    if not hasattr(head_geo, 'U') or not hasattr(head_geo, 'W'):
-                                        can_fuse = False
-                                        break
-                                    U_list.append(head_geo.U)
-                                    W_list.append(head_geo.W)
-                                else:
-                                    # Dummy placeholders for torus mode
-                                    U_list.append(torch.zeros(self.dim // self.heads, 1, device=x.device))
-                                    W_list.append(torch.zeros(self.dim // self.heads, 1, device=x.device))
+            # Strict CUDA requirement as per user instruction "scan no deberia estar"
+            if not CUDA_AVAILABLE:
+                raise RuntimeError("CUDA is required for Manifold.forward in non-scan mode. Python loop fallback is disabled.")
 
-                                # Clutch parameters
-                                if hasattr(head_geo, 'forget_gate'):
-                                    W_forget_list.append(head_geo.forget_gate.weight)
-                                    b_forget_list.append(head_geo.forget_gate.bias)
-                                    W_input_list.append(head_geo.input_gate.weight)
-                                else:
-                                    # Fallback for legacy christoffels
-                                    h_dim = target_layer.head_dim
-                                    W_forget_list.append(torch.zeros(self.dim//self.heads, h_dim, device=x.device))
-                                    b_forget_list.append(torch.zeros(self.dim//self.heads, device=x.device))
-                                    W_input_list.append(torch.zeros(self.dim//self.heads, h_dim, device=x.device))
-                                
-                                # Singularity parameters
-                                if hasattr(head_geo, 'V') and head_geo.V is not None:
-                                    W_potential_list.append(head_geo.V.weight)
-                                    b_bias = head_geo.V.bias
-                                    if b_bias is None:
-                                        b_bias = torch.zeros(1, device=x.device)
-                                    b_potential_list.append(b_bias)
-                                else:
-                                    h_dim = target_layer.head_dim
-                                    # Potential gate uses 2*head_dim for torus
-                                    
-                                    p_dim = 2 * (self.dim // self.heads) if is_torus else (self.dim // self.heads)
-                                    W_potential_list.append(torch.zeros(1, p_dim, device=x.device))
-                                    b_potential_list.append(torch.zeros(1, device=x.device))
-                            
-                            if not can_fuse: break
-                        
-                        if can_fuse:
-                             U_stack = torch.stack(U_list)
-                             W_stack = torch.stack(W_list)
-                             W_f_stack = torch.stack(W_forget_list)
-                             W_i_stack = torch.stack(W_input_list)
-                             b_f_stack = torch.stack(b_forget_list)
-                             
-                             W_p_stack = torch.stack(W_potential_list)
-                             b_p_stack = torch.stack(b_potential_list)
-                             
-                             # Use base_dt from the first layer
-                             first_layer = self.layers[0]
-                             if hasattr(first_layer, 'macro_manifold'): first_layer = first_layer.macro_manifold
-                             base_dt = first_layer.base_dt
-                             
-                             # Use layer 0 mixing weights
-                             mix_x = torch.empty(0, device=x.device)
-                             mix_v = torch.empty(0, device=x.device)
-                             if self.heads > 1 and hasattr(self.layers[0], 'out_proj_x'):
-                                     mix_x = self.layers[0].out_proj_x.weight
-                                     mix_v = self.layers[0].out_proj_v.weight
-                             
-                             # Dispatch to fused kernel
-                             act_inf = self.physics_config.get('active_inference', {})
-                             plasticity = act_inf.get('plasticity', 0.0) if act_inf.get('enabled', False) else 0.0
-                             
-                             sing_cfg = self.physics_config.get('singularities', {})
-                             sing_enabled = sing_cfg.get('enabled', False)
-                             sing_thresh = sing_cfg.get('threshold', 0.9) if sing_enabled else 1.0
-                             sing_strength = sing_cfg.get('strength', 1.0) if sing_enabled else 1.0
-                             
-                             # Torus radii
-                             major_R = topo_cfg.get('major_radius', 2.0)
-                             minor_r = topo_cfg.get('minor_radius', 1.0)
-
-                             if self.training:
-                                 from .cuda.autograd import recurrent_manifold_fused_autograd
-                                 x_in = x
-                                 v_in = v
-                                 
-                                 f_layer = self.layers[0]
-                                 if hasattr(f_layer, 'macro_manifold'): f_layer = f_layer.macro_manifold
-                                 
-                                 dt_scales = torch.nn.functional.softplus(f_layer.dt_params)
-                                 forget_rates = torch.sigmoid(f_layer.christoffels[0].forget_gate.bias.mean())
-                                 if forget_rates.numel() == 1:
-                                     forget_rates = forget_rates.expand(self.heads)
-                                 
-                                 topology_id = 1 if is_torus else 0
-                                 
-                                 # Autograd wrapper receives the same parameter set as forward
-                                 res = recurrent_manifold_fused_autograd(
-                                     x=x_in, v=v_in, f=all_forces * mask, U=U_stack, W=W_stack, 
-                                     dt=base_dt, dt_scales=dt_scales, forget_rates=forget_rates, num_heads=self.heads,
-                                     plasticity=plasticity, sing_thresh=sing_thresh, sing_strength=sing_strength,
-                                     mix_x=mix_x, mix_v=mix_v, W_forget_stack=W_f_stack, W_input_stack=W_i_stack, b_forget_stack=b_f_stack, 
-                                     W_potential_stack=W_p_stack, b_potential_stack=b_p_stack,
-                                     topology=topology_id, R=major_R, r=minor_r
-                                 )
-                                 
-                                 x_final, v_final, x_seq, reg_loss = res
-                                 out_seq = x_seq
-                                 if not self.holographic:
-                                     out_seq = self.readout_norm(x_seq)
-                                 logits = self.readout(out_seq)
-                                 
-                                 return logits, (x_final, v_final), [reg_loss], [], x_seq, all_forces
-                             else:
-                                 x_in = x
-                                 v_in = v
-                                 
-                                 f_layer = self.layers[0]
-                                 if hasattr(f_layer, 'macro_manifold'): f_layer = f_layer.macro_manifold
-
-                                 dt_scales = torch.nn.functional.softplus(f_layer.dt_params)
-                                 forget_rates = torch.sigmoid(f_layer.christoffels[0].forget_gate.bias.mean()).expand(self.heads)
-                                 
-                                 topology_id = 1 if is_torus else 0
-                                 
-                                 res = recurrent_manifold_fused(
-                                     x=x_in, v=v_in, f=all_forces * mask, U_stack=U_stack, W_stack=W_stack, 
-                                     dt=base_dt, dt_scales=dt_scales, forget_rates=forget_rates, num_heads=self.heads,
-                                     plasticity=plasticity, sing_thresh=sing_thresh, sing_strength=sing_strength,
-                                     mix_x=mix_x, mix_v=mix_v, Wf=W_f_stack, Wi=W_i_stack, bf=b_f_stack, 
-                                     Wp=W_p_stack, bp=b_p_stack, 
-                                     topology=topology_id, R=major_R, r=minor_r
-                                 )
-                                 
-                                 if res is not None:
-                                     x_final, v_final, x_seq, reg_loss = res
-                                     out_seq = x_seq
-                                     if not self.holographic:
-                                         out_seq = self.readout_norm(x_seq)
-                                     logits = self.readout(out_seq)
-                                     return logits, (x_final, v_final), [reg_loss], [], x_seq, all_forces
-                except Exception as e:
-                    # Fallback to standard loop if fusion fails
-                    import traceback
-                    print(f"[GFN:WARN] Fused Kernel Failed, falling back to Python loop: {e}")
-                    traceback.print_exc()
-                    pass
-
-            v_seq = []
-            x_seq = []
-            for t in range(seq_len):
-                # Force for current timestep
-                force = all_forces[:, t] * mask[:, t]
+            try:
+                from gfn.cuda.ops import recurrent_manifold_fused
                 
-                # Evolve state through layers
+                # Stack per-head parameters across layers
+                U_list = []
+                W_list = []
+                # Clutch gate stacks
+                W_forget_list = []
+                W_input_list = []
+                b_forget_list = []
+                
+                # Singularity gate stacks
+                W_potential_list = []
+                b_potential_list = []
+                
                 for layer in self.layers:
-                    x, v, context, layer_christoffels = layer(x, v, force, context, collect_christ=collect_christ)
-                    if collect_christ:
-                        all_christoffels.extend(layer_christoffels) 
+                    # Handle fractal wrapper
+                    target_layer = layer
+                    if hasattr(layer, 'macro_manifold'):
+                        target_layer = layer.macro_manifold
+                        
+                    for head_idx in range(self.heads):
+                        head_geo = target_layer.christoffels[head_idx]
+                        
+                        # Non-torus uses U/W matrices
+                        if not is_torus:
+                            if not hasattr(head_geo, 'U') or not hasattr(head_geo, 'W'):
+                                # Fallback to zeros if missing
+                                U_list.append(self._create_dummy_tensor((self.heads, 1), x.device)) # Dummy
+                                W_list.append(self._create_dummy_tensor((self.heads, 1), x.device))
+                            else:
+                                U_list.append(head_geo.U)
+                                W_list.append(head_geo.W)
+                        else:
+                            # Dummy placeholders for torus mode
+                            h_dim = target_layer.head_dim
+                            U_list.append(self._create_dummy_tensor((1, h_dim), x.device))
+                            W_list.append(self._create_dummy_tensor((h_dim, 1), x.device))
+
+                        # Clutch parameters
+                        if hasattr(head_geo, 'forget_gate') and hasattr(head_geo, 'input_gate'):
+                            W_forget_list.append(head_geo.forget_gate.weight)
+                            W_input_list.append(head_geo.input_gate.weight)
+                            b_forget_list.append(head_geo.forget_gate.bias)
+                        elif hasattr(target_layer, 'friction_gates'):
+                            # Legacy/combined gate in MLayer
+                            gate = target_layer.friction_gates[head_idx]
+                            w = gate.weight
+                            b = gate.bias
+                            d = target_layer.head_dim
+                            
+                            if is_torus:
+                                W_forget_list.append(w[:, :2*d])
+                                W_input_list.append(w[:, 2*d:])
+                            else:
+                                W_forget_list.append(w[:, :d])
+                                W_input_list.append(w[:, d:])
+                            b_forget_list.append(b)
+                        else:
+                            # Fallback
+                            h_dim = target_layer.head_dim
+                            W_forget_list.append(self._create_dummy_tensor((h_dim, h_dim), x.device))
+                            b_forget_list.append(self._create_dummy_tensor((h_dim,), x.device))
+                            W_input_list.append(self._create_dummy_tensor((h_dim, h_dim), x.device))
+                        
+                        # Singularity parameters
+                        if hasattr(head_geo, 'V') and head_geo.V is not None:
+                            W_potential_list.append(head_geo.V.weight)
+                            b_bias = head_geo.V.bias
+                            if b_bias is None:
+                                b_bias = self._create_dummy_tensor((1,), x.device)
+                            b_potential_list.append(b_bias)
+                        else:
+                            h_dim = target_layer.head_dim
+                            p_dim = 2 * h_dim if is_torus else h_dim
+                            W_potential_list.append(self._create_dummy_tensor((1, p_dim), x.device))
+                            b_potential_list.append(self._create_dummy_tensor((1,), x.device))
+                    
                 
-                v_seq.append(v)
-                x_seq.append(x)
+                # Normalize weights before stacking to prevent gradient explosion
+                def normalize_weight_list(weight_list, eps=1e-8):
+                    """Normalize weight matrices to prevent gradient explosion"""
+                    if not weight_list:
+                        return torch.empty(0, device=x.device)
+                    
+                    # Stack weights
+                    stacked = torch.stack(weight_list)
+                    
+                    # Compute per-weight normalization factor
+                    norms = torch.norm(stacked.view(stacked.size(0), -1), p=2, dim=1, keepdim=True)
+                    
+                    # Avoid division by zero and clamp normalization factor
+                    norm_factors = torch.clamp(norms, min=eps, max=100.0)
+                    
+                    # Normalize weights
+                    normalized = stacked / norm_factors.view(-1, *([1] * (stacked.dim() - 1)))
+                    
+                    return normalized
                 
-                # Project position to logits
-                out = x
+                U_stack = normalize_weight_list(U_list)
+                W_stack = normalize_weight_list(W_list)
+                W_f_stack = normalize_weight_list(W_forget_list)
+                W_i_stack = normalize_weight_list(W_input_list)
+                b_f_stack = torch.stack(b_forget_list) if b_forget_list else torch.empty(0, device=x.device)
+                
+                W_p_stack = normalize_weight_list(W_potential_list)
+                b_p_stack = torch.stack(b_potential_list) if b_potential_list else torch.empty(0, device=x.device)
+                
+                # Use base_dt from the first layer
+                first_layer = self.layers[0]
+                if hasattr(first_layer, 'macro_manifold'): first_layer = first_layer.macro_manifold
+                base_dt = first_layer.base_dt
+                
+                # Use layer 0 mixing weights (Kernel Limitation: Shared Mixing)
+                mix_x = torch.empty(0, device=x.device)
+                mix_v = torch.empty(0, device=x.device)
+                layer0 = self.layers[0]
+                if hasattr(layer0, 'macro_manifold'): layer0 = layer0.macro_manifold
+                
+                if self.heads > 1 and hasattr(layer0, 'out_proj_x'):
+                        mix_x = layer0.out_proj_x.weight
+                        mix_v = layer0.out_proj_v.weight
+
+                # Use layer 0 dt_scales (Kernel Limitation: Shared Time Scales)
+                dt_scales = torch.ones(self.heads, device=x.device)
+                if hasattr(layer0, 'dt_params'):
+                    # Apply softplus and clamp to prevent extreme values that cause instability
+                    raw_scales = torch.nn.functional.softplus(layer0.dt_params)
+                    dt_scales = torch.clamp(raw_scales, min=1e-4, max=0.1)  # Stable integration range
+
+                # Forget rates (Legacy/Unused by fused kernel usually, passing zeros)
+                forget_rates = self._create_dummy_tensor((self.heads,), x.device)
+                
+                # Plasticity & Singularity
+                act_inf = self.physics_config.get('active_inference', {})
+                plasticity = 0.0
+                if act_inf.get("enabled", False):
+                    plasticity = (
+                        act_inf.get("reactive_curvature", {}).get("plasticity", 0.0)
+                        if act_inf.get("reactive_curvature", {}).get("enabled", False)
+                        else 0.0
+                    )
+                
+                sing_cfg = act_inf.get("singularities", {})
+                if not sing_cfg:
+                    sing_cfg = self.physics_config.get("singularities", {})
+                sing_enabled = sing_cfg.get("enabled", False)
+                sing_thresh = sing_cfg.get("threshold", 0.9) if sing_enabled else 1.0
+                sing_strength = sing_cfg.get("strength", 1.0) if sing_enabled else 1.0
+                
+                topology_id = 1 if is_torus else 0
+                R_val = topo_cfg.get('R', 2.0)
+                r_val = topo_cfg.get('r', 1.0)
+                
+                # Validate toroidal parameters to prevent division by zero and ensure manifold consistency
+                if is_torus:
+                    # Ensure R > r > 0 for valid torus geometry
+                    if R_val <= r_val:
+                        R_val = r_val + 1.0  # Force R > r
+                    if r_val <= 0:
+                        r_val = 0.5  # Minimum positive value
+                        R_val = max(R_val, r_val + 1.0)  # Ensure R > r
+                    
+                    # Clamp to reasonable ranges to prevent numerical instability
+                    r_val = max(0.1, min(r_val, 10.0))
+                    R_val = max(r_val + 0.5, min(R_val, 20.0))  # Maintain R > r with minimum gap
+
+                # Call Fused Kernel
+                x_seq, v_seq, x_final, v_final, reg_loss = recurrent_manifold_fused(
+                    x, v, all_forces, 
+                    U_stack, W_stack, 
+                    base_dt, dt_scales, forget_rates, 
+                    self.heads, 
+                    mix_x, mix_v, 
+                    W_f_stack, W_i_stack, b_f_stack, 
+                    W_p_stack, b_p_stack,
+                    topology_id, R_val, r_val, 
+                    plasticity, sing_thresh, sing_strength
+                )
+                
+                # Final readout
+                x_final_readout = x_seq
                 if not self.holographic:
-                    out = self.readout_norm(x)
-                logit = self.readout(out)  # [batch, vocab_size]
-                logits_list.append(logit.unsqueeze(1))
-            
-            # Stack all logits
-            logits = torch.cat(logits_list, dim=1)  # [batch, seq_len, vocab_size]
-            
-            return logits, (x, v), all_christoffels, v_seq, x_seq, all_forces
+                    x_final_readout = self.readout_norm(x_final_readout)
+                logits = self.readout(x_final_readout)
+                
+                # We don't have per-layer christoffels to return, but we provide sequences and forces for analysis
+                return logits, (x_final, v_final), [], v_seq, x_seq, all_forces, reg_loss
+                
+            except Exception as e:
+                print(f"[GFN:ERROR] Fused Kernel Failed: {e}")
+                raise e
     
     def generate(self, prompt_ids, max_new_tokens=50, temperature=1.0, top_k=None, top_p=None):
         """

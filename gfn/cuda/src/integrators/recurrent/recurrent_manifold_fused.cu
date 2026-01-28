@@ -1,4 +1,4 @@
-#include "../../include/forces.cuh"
+#include "../../../include/forces.cuh"
 
 #define BLOCK_SIZE 512
 
@@ -34,6 +34,7 @@ __global__ void recurrent_manifold_fused_kernel(
     
     const int b = blockIdx.x, tid = threadIdx.x;
     if (b >= batch) return;
+    __shared__ float s_reg_buf;
 
     for (int i = tid; i < dim; i += blockDim.x) { s_x[i] = x_state[b * dim + i]; s_v[i] = v_state[b * dim + i]; }
     __syncthreads();
@@ -61,6 +62,7 @@ __global__ void recurrent_manifold_fused_kernel(
                 
                 int w_x_s = (topology == TORUS) ? (2 * dim_per_head) : dim_per_head;
                 const float* W_f_h = W_forget_stack + (layer_head_idx * dim_per_head * w_x_s);
+                const float* W_in_h = W_input_stack ? (W_input_stack + (layer_head_idx * dim_per_head * dim_per_head)) : nullptr;
                 const float* b_f_h = b_forget_stack + (layer_head_idx * dim_per_head);
                 const float* s_f_h = s_force + head_offset;
                 float* s_h_s = s_h + h * head_rank; 
@@ -69,7 +71,7 @@ __global__ void recurrent_manifold_fused_kernel(
                 float M_total = 1.0f;
                 
                 // 1. Friction & Clutch
-                compute_friction_coeff(s_mu_h, s_x_h, W_f_h, b_f_h, dim_per_head, tid, topology);
+                compute_friction_coeff(s_mu_h, s_x_h, s_f_h, W_f_h, W_in_h, b_f_h, dim_per_head, tid, topology, 5.0f, 0.1f);
                 
                 // 2. Plasticity
                 float M_plast = compute_plasticity_scale(s_buf_energy, s_v_h, dim_per_head, tid, plasticity);
@@ -86,7 +88,18 @@ __global__ void recurrent_manifold_fused_kernel(
                 // 4. Kick 1 (Half) + Friction 1 (Half)
                 apply_friction_damping(s_v_h, s_mu_h, dim_per_head, tid, half_dt); // Pre-damp
                 
-                compute_christoffel_force(s_gamma_h, s_v_h, s_x_h, U_h, W_h, s_h_s, dim_per_head, head_rank, tid, topology, M_total, R_val, r_val);
+                compute_christoffel_force(s_gamma_h, s_v_h, s_x_h, U_h, W_h, s_h_s, dim_per_head, head_rank, tid, topology, M_total, R_val, r_val, 0.01f, 50.0f);
+                if (reg_loss != nullptr) {
+                    float reg_local = 0.0f;
+                    for (int i = tid; i < dim_per_head; i += blockDim.x) reg_local += s_gamma_h[i] * s_gamma_h[i];
+                    reg_local = warpReduceSum(reg_local);
+                    if (tid == 0) s_reg_buf = 0.0f;
+                    __syncthreads();
+                    if ((tid & 31) == 0) atomicAdd(&s_reg_buf, reg_local);
+                    __syncthreads();
+                    if (tid == 0) atomicAdd(&reg_loss[b], s_reg_buf);
+                    __syncthreads();
+                }
                 
                 for (int i = tid; i < dim_per_head; i += blockDim.x) s_v_h[i] += half_dt * (s_f_h[i] - s_gamma_h[i]);
                 __syncthreads();
@@ -99,7 +112,7 @@ __global__ void recurrent_manifold_fused_kernel(
                 __syncthreads();
                 
                 // 6. Recalculate State-Dependent Terms
-                compute_friction_coeff(s_mu_h, s_x_h, W_f_h, b_f_h, dim_per_head, tid, topology);
+                compute_friction_coeff(s_mu_h, s_x_h, s_f_h, W_f_h, W_in_h, b_f_h, dim_per_head, tid, topology, 5.0f, 0.1f);
                 float M_plast2 = compute_plasticity_scale(s_buf_energy, s_v_h, dim_per_head, tid, plasticity);
                 M_total = M_plast2; // Reset and re-apply Singularity at new X
                 
@@ -111,7 +124,17 @@ __global__ void recurrent_manifold_fused_kernel(
                 }
                 
                 // 7. Kick (Second Half)
-                compute_christoffel_force(s_gamma_h, s_v_h, s_x_h, U_h, W_h, s_h_s, dim_per_head, head_rank, tid, topology, M_total, R_val, r_val);
+                compute_christoffel_force(s_gamma_h, s_v_h, s_x_h, U_h, W_h, s_h_s, dim_per_head, head_rank, tid, topology, M_total, R_val, r_val, 0.01f, 50.0f);
+                if (reg_loss != nullptr) {
+                    float reg_local = 0.0f;
+                    for (int i = tid; i < dim_per_head; i += blockDim.x) reg_local += s_gamma_h[i] * s_gamma_h[i];
+                    reg_local = warpReduceSum(reg_local);
+                    if (tid == 0) s_reg_buf = 0.0f;
+                    __syncthreads();
+                    if ((tid & 31) == 0) atomicAdd(&s_reg_buf, reg_local);
+                    __syncthreads();
+                    if (tid == 0) atomicAdd(&reg_loss[b], s_reg_buf);
+                }
                 
                 for (int i = tid; i < dim_per_head; i += blockDim.x) s_v_h[i] += half_dt * (s_f_h[i] - s_gamma_h[i]);
                 __syncthreads();

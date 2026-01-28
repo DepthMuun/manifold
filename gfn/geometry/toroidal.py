@@ -33,7 +33,7 @@ class ToroidalChristoffel(nn.Module):
         # State component of friction gate
         self.forget_gate = nn.Linear(gate_input_dim, dim)
         nn.init.normal_(self.forget_gate.weight, std=0.01)
-        nn.init.constant_(self.forget_gate.bias, -5.0) # Release the clutch (Low friction start) 
+        nn.init.constant_(self.forget_gate.bias, 0.0) # Moderate friction start (was -5.0) 
         
         # Force component of friction gate
         self.input_gate = nn.Linear(dim, dim, bias=False)

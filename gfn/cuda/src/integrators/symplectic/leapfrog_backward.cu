@@ -1,5 +1,5 @@
 
-#include "../../include/christoffel_impl.cuh"
+#include "../../../include/christoffel_impl.cuh"
 
 #define BLOCK_SIZE 256
 

@@ -1,9 +1,12 @@
 
-#include "../../include/forces.cuh"
+#include "../../../include/christoffel_impl.cuh"
 
 #define BLOCK_SIZE 256
 
-__global__ void euler_fused_kernel(
+/**
+ * HEUN'S METHOD FUSED KERNEL (2nd Order Runge-Kutta)
+ */
+__global__ void heun_fused_kernel(
     const float* __restrict__ x_in,
     const float* __restrict__ v_in,
     const float* __restrict__ f,
@@ -24,13 +27,15 @@ __global__ void euler_fused_kernel(
     extern __shared__ float s_mem_f[];
     float* s_x = s_mem_f;
     float* s_v = s_x + dim;
-    float* s_gamma = s_v + dim;
-    float* s_h = s_gamma + dim;
+    float* s_x_pred = s_v + dim;
+    float* s_v_pred = s_x_pred + dim;
+    float* s_gamma = s_v_pred + dim; // Need 2 slots for gamma
+    float* s_h = s_gamma + 2 * dim;
     
-    // Double alignment for Energy buffer
-    size_t offset_f = (3 * dim + rank);
-    if (offset_f % 2 != 0) offset_f++;
-    double* s_buf_energy = (double*)(s_mem_f + offset_f);
+    double* s_mem_d = (double*)(s_h + rank + (rank % 2));
+    double* s_E = s_mem_d;
+    double* s_P = s_E + 1;
+    float* s_M = (float*)(s_P + 1);
 
     const int b = blockIdx.x;
     const int tid = threadIdx.x;
@@ -45,19 +50,24 @@ __global__ void euler_fused_kernel(
     const float eff_dt = dt * dt_scale;
 
     for (int s = 0; s < steps; s++) {
-        // 1. Plasticity
-        float M = compute_plasticity_scale(s_buf_energy, s_v, dim, tid, 0.0f); // Default 0 plasticity for Euler?
-        // Note: Euler implementation didn't have plasticity param passed in previously?
-        // Checking legacy call: passed '0.0f' as plasticity.
-        
-        // 2. Christoffel Force
-        compute_christoffel_force(s_gamma, s_v, s_x, U, W, s_h, dim, rank, tid, topology, M, R_val, r_val);
+        // --- Predictor (Euler) ---
+        christoffel_device(s_v, U, W, s_gamma, s_x, nullptr, dim, rank, 0.0f, 1.0f, 1.0f, false, topology, s_h, s_E, s_P, s_M, R_val, r_val);
         __syncthreads();
-
         for (int i = tid; i < dim; i += blockDim.x) {
             float f_val = (f != nullptr) ? f[b * dim + i] : 0.0f;
-            s_v[i] += eff_dt * (f_val - s_gamma[i]);
-            s_x[i] += eff_dt * s_v[i];
+            s_v_pred[i] = s_v[i] + eff_dt * (f_val - s_gamma[i]);
+            s_x_pred[i] = s_x[i] + eff_dt * s_v[i];
+        }
+        __syncthreads();
+
+        // --- Corrector (Trapezoidal) ---
+        christoffel_device(s_v_pred, U, W, s_gamma + dim, s_x_pred, nullptr, dim, rank, 0.0f, 1.0f, 1.0f, false, topology, s_h, s_E, s_P, s_M, R_val, r_val);
+        __syncthreads();
+        for (int i = tid; i < dim; i += blockDim.x) {
+            float f_val = (f != nullptr) ? f[b * dim + i] : 0.0f;
+            float acc_avg = 0.5f * ((f_val - s_gamma[i]) + (f_val - s_gamma[dim + i]));
+            s_v[i] += eff_dt * acc_avg;
+            s_x[i] += eff_dt * 0.5f * (s_v[i] + s_v_pred[i]);
         }
         __syncthreads();
     }
@@ -68,7 +78,7 @@ __global__ void euler_fused_kernel(
     }
 }
 
-extern "C" void launch_euler_fused(
+extern "C" void launch_heun_fused(
     const float* x, const float* v, const float* f,
     const float* U, const float* W,
     float* x_new, float* v_new,
@@ -77,8 +87,8 @@ extern "C" void launch_euler_fused(
     int steps, int topology, float R_val, float r_val,
     cudaStream_t stream
 ) {
-    int shared = (3 * dim + rank + 16) * sizeof(float) + 2 * sizeof(double);
-    euler_fused_kernel<<<batch, BLOCK_SIZE, shared, stream>>>(
+    int shared = (5 * dim + rank + 16) * sizeof(float) + 2 * sizeof(double);
+    heun_fused_kernel<<<batch, BLOCK_SIZE, shared, stream>>>(
         x, v, f, U, W, x_new, v_new, dt, dt_scale, batch, dim, rank, steps, topology, R_val, r_val
     );
 }
