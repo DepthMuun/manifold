@@ -101,14 +101,16 @@ class ToroidalChristoffel(nn.Module):
             v_th = v[..., i]
             v_ph = v[..., i+1]
             
-            denom = self.R + self.r * torch.cos(th)
-            # Differentiable safety clamp
-            denom_safe = torch.clamp(denom, min=1e-6)
-
-            term_th = denom * torch.sin(th) / self.r
+            # Double protection against division by zero
+            # 1. Clamp the denominator to prevent near-zero values
+            denom = torch.clamp(self.R + self.r * torch.cos(th), min=1e-4)
+            
+            # 2. Add epsilon in division for extra safety
+            term_th = denom * torch.sin(th) / (self.r + 1e-8)
             gamma[..., i] = term_th * (v_ph ** 2)
             
-            term_ph = -(self.r * torch.sin(th)) / denom_safe
+            # Double epsilon protection for the second term
+            term_ph = -(self.r * torch.sin(th)) / (denom + 1e-8)
             gamma[..., i+1] = 2.0 * term_ph * v_ph * v_th
             
         gamma = gamma * 0.05 # Strong Curvature (User Requested Full Torus)

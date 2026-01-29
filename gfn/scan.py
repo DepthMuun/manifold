@@ -1,5 +1,6 @@
 import torch
 import math
+from typing import Tuple
 
 # Try to import CUDA kernels
 try:
@@ -8,7 +9,8 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-def parallel_scan(a, x):
+
+def parallel_scan(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
     Computes y_t = a_t * y_{t-1} + x_t via parallel associative scan.
     
@@ -18,45 +20,45 @@ def parallel_scan(a, x):
         
     Returns:
         y: Scan result [batch, seq_len, dim]
+        
+    Raises:
+        ValueError: If input tensors have incorrect dimensions or shapes
     """
-    # Use CUDA kernel if available and on GPU
-    if CUDA_AVAILABLE and a.is_cuda:
-        return cuda_ops.parallel_scan_fused(a, x)
+    # Input validation
+    if a.dim() != 3 or x.dim() != 3:
+        raise ValueError(
+            f"Expected 3D tensors [batch, seq_len, dim], "
+            f"got a.shape={a.shape}, x.shape={x.shape}"
+        )
     
-    # Fallback to PyTorch implementation
-    # Simply using PyTorch's native cumulatives is often faster/stable enough 
-    # for sequences < 4096 than custom cuda kernels without Triton.
-    # But native cumprod is unstable for deep recurrences.
-    # We implement a parallel prefix scan using log-space reduction if needed,
-    # or the standard recursive doubling algorithm.
-    
-    # For MANIFOLD, we are solving v_t = decay_t * v_{t-1} + force_t
-    
-    # 1. Compute cumulative product of 'a' (decays)
-    # log_a = torch.log(a.clamp(min=1e-6))
-    # cum_log_a = torch.cumsum(log_a, dim=1)
-    # cum_a = torch.exp(cum_log_a)
-    
-    # This is numerically unstable if 'a' > 1.
-    # For now, we utilize a sequential fallback for correctness or a 
-    # weak parallel implementation. 
-    # REAL IMPLEMENTATION: We will use the "Blelloc Scan" algorithm in pure PyTorch.
-    
-    # Algorithm:
-    # y_t = x_t + a_t * y_{t-1}
-    # This is a first-order linear recurrence.
-    
-    # Efficient PyTorch implementation of parallel scan is non-trivial without 
-    # custom kernels (like selective_scan_cuda). 
-    # However, for prototyping "Proof of Concept" of scan support,
-    # we can use a recursive doubling approach.
+    if a.shape != x.shape:
+        raise ValueError(
+            f"Input tensors must have same shape, "
+            f"got a.shape={a.shape}, x.shape={x.shape}"
+        )
     
     B, L, D = x.shape
+    
+    if L <= 0:
+        raise ValueError(f"Sequence length must be positive, got L={L}")
+    
+    # Use CUDA kernel if available and on GPU
+    if CUDA_AVAILABLE and a.is_cuda:
+        try:
+            return cuda_ops.parallel_scan_fused(a, x)
+        except Exception as e:
+            print(f"[GFN:WARN] CUDA parallel_scan failed: {e}, falling back to PyTorch")
+            # Fall through to PyTorch implementation
+    
+    # Fallback to PyTorch implementation
+    # For MANIFOLD, we are solving v_t = decay_t * v_{t-1} + force_t
+    # Algorithm: y_t = x_t + a_t * y_{t-1}
+    # This is a first-order linear recurrence.
     
     if L < 32:
         # Sequential is faster for tiny/short sequences
         y = torch.zeros_like(x)
-        h = torch.zeros(B, D, device=x.device)
+        h = torch.zeros(B, D, device=x.device, dtype=x.dtype)
         for t in range(L):
             h = a[:, t] * h + x[:, t]
             y[:, t] = h
@@ -80,12 +82,11 @@ def parallel_scan(a, x):
         prev_x = torch.roll(curr_x, shifts=shift, dims=1)
         
         # Mask out wrapped around elements
-        # (Technically we can zero them, but simpler logic:)
         # We only want to combine with elements strictly 'before' us in time.
         # torch.roll wraps around, so indices [0, ... shift-1] get values from end.
         # We must mask them.
         
-        mask = torch.ones(L, device=x.device)
+        mask = torch.ones(L, device=x.device, dtype=x.dtype)
         mask[:shift] = 0
         mask = mask.view(1, L, 1)
         
@@ -102,10 +103,3 @@ def parallel_scan(a, x):
         curr_x = torch.where(mask > 0.5, new_x, curr_x)
         
     return curr_x
-
-class ParallelScan(torch.autograd.Function):
-    """
-    A custom autograd function could be used here for memory efficiency,
-    but we start with the pure PyTorch impl above.
-    """
-    pass

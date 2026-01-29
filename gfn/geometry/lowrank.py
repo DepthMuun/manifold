@@ -81,19 +81,23 @@ class LowRankChristoffel(nn.Module):
                          
                      gamma_cuda = gamma_cuda + friction * v
                 return torch.clamp(gamma_cuda, -self.clamp_val, self.clamp_val)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[GFN:WARN] CUDA lowrank_christoffel failed: {e}, falling back to PyTorch")
+            # Fall through to PyTorch implementation
     
+        # PyTorch fallback with improved numerical stability
         if v.dim() == 3 and self.U.dim() == 3:
             proj = torch.bmm(v, self.U) 
             norm = torch.norm(proj, dim=-1, keepdim=True)
-            scale = 1.0 / (1.0 + norm + 1e-6)
+            # Double epsilon protection for division
+            scale = 1.0 / (1.0 + norm + 1e-4)
             sq = (proj * proj) * scale 
             gamma = torch.bmm(sq, self.W.transpose(1, 2)) 
         else:
             proj = torch.matmul(v, self.U)
             norm = torch.norm(proj, dim=-1, keepdim=True)
-            scale = 1.0 / (1.0 + norm + 1e-6)
+            # Double epsilon protection for division
+            scale = 1.0 / (1.0 + norm + 1e-4)
             sq = (proj * proj) * scale
             gamma = torch.matmul(sq, self.W.t())
             

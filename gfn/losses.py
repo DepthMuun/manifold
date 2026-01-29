@@ -35,7 +35,9 @@ def hamiltonian_loss(velocities: list, states: list = None, metric_fn=None, lamb
         
     diffs = []
     for i in range(len(energies) - 1):
-        dE = torch.abs(energies[i+1] - energies[i])
+        # Use smooth L2 approximation instead of abs() to prevent gradient vanishing
+        # sqrt(x^2 + eps) has non-zero gradient everywhere, unlike abs(x)
+        dE = torch.sqrt((energies[i+1] - energies[i]).pow(2) + 1e-8)
         if forces is not None and i < len(forces):
             f_norm = forces[i].pow(2).sum(dim=-1)
             mask = (f_norm < 1e-4).float()

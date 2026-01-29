@@ -140,7 +140,39 @@ class AdjointManifold(nn.Module):
             x = self.x0.expand(batch_size, -1)
             v = self.v0.expand(batch_size, -1)
         else:
+            # Validate state input
+            if not isinstance(state, tuple) or len(state) != 2:
+                raise ValueError(
+                    f"state must be a tuple of (x, v), got {type(state)} "
+                    f"with length {len(state) if isinstance(state, tuple) else 'N/A'}"
+                )
+            
             x, v = state
+            
+            # Validate tensor types
+            if not isinstance(x, torch.Tensor) or not isinstance(v, torch.Tensor):
+                raise ValueError(
+                    f"state elements must be torch.Tensor, "
+                    f"got x: {type(x)}, v: {type(v)}"
+                )
+            
+            # Validate shapes
+            expected_shape = (batch_size, self.dim)
+            if x.shape != expected_shape:
+                raise ValueError(
+                    f"Invalid x shape: expected {expected_shape}, got {x.shape}"
+                )
+            if v.shape != expected_shape:
+                raise ValueError(
+                    f"Invalid v shape: expected {expected_shape}, got {v.shape}"
+                )
+            
+            # Validate device consistency
+            if x.device != input_ids.device or v.device != input_ids.device:
+                raise ValueError(
+                    f"Device mismatch: input_ids on {input_ids.device}, "
+                    f"x on {x.device}, v on {v.device}"
+                )
         
         all_forces = self.embedding(input_ids)
         
