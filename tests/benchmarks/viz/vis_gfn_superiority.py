@@ -96,50 +96,13 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
         TWO_PI = 2.0 * PI
         half_pi = PI * 0.5
 
-        # [AutoPy/Lazify Optimization]
-        # Accelerated Tensor Operations via Custom CUDA Kernels
-        try:
-            from lazify import AutoTensor
-            import lazify.core.tensor
-            lazify.core.tensor._DEFAULT_GRAPH.nodes = [] # Reset graph context
-            
-            # Transfer to AutoPy Graph
-            # Note: Explicit transfer required until AutoTensor wraps Torch directly
-            x_np = x_pred.detach().cpu().numpy() 
-            x = AutoTensor(x_np)
-
-            # Symbolic Graph Construction (Lazify API)
-            diff = x - half_pi
-            term1 = abs(diff) % TWO_PI
-            term2 = TWO_PI - term1
-            dist_pos = term1.min(term2)
-
-            diff_neg = x + half_pi
-            term1_neg = abs(diff_neg) % TWO_PI
-            term2_neg = TWO_PI - term1_neg
-            dist_neg = term1_neg.min(term2_neg)
-
-            # JIT Compile & Execute on CUDA
-            # Returns PyTorch tensors on GPU directly from custom kernel
-            r_pos = dist_pos.cuda()
-            r_neg = dist_neg.cuda()
-
-            # Reductions (Mean) - Hybrid execution
-            d_pos = r_pos.mean(dim=-1)
-            d_neg = r_neg.mean(dim=-1)
-            
-            preds = (d_pos < d_neg).long()
-            acc = (preds == targets_class).float().mean().item()
-
-        except Exception as e:
-            # Fallback to standard PyTorch if Lazify fails
-            # console.print(f"[yellow]Lazify fallback: {e}[/]")
-            dist_pos = torch.min(torch.abs(x_pred - half_pi) % TWO_PI, TWO_PI - (torch.abs(x_pred - half_pi) % TWO_PI))
-            dist_neg = torch.min(torch.abs(x_pred + half_pi) % TWO_PI, TWO_PI - (torch.abs(x_pred + half_pi) % TWO_PI))
-            d_pos = dist_pos.mean(dim=-1)
-            d_neg = dist_neg.mean(dim=-1)
-            preds = (d_pos < d_neg).long()
-            acc = (preds == targets_class).float().mean().item()
+        # PyTorch native implementation - consistent CUDA/CPU execution
+        dist_pos = torch.min(torch.abs(x_pred - half_pi) % TWO_PI, TWO_PI - (torch.abs(x_pred - half_pi) % TWO_PI))
+        dist_neg = torch.min(torch.abs(x_pred + half_pi) % TWO_PI, TWO_PI - (torch.abs(x_pred + half_pi) % TWO_PI))
+        d_pos = dist_pos.mean(dim=-1)
+        d_neg = dist_neg.mean(dim=-1)
+        preds = (d_pos < d_neg).long()
+        acc = (preds == targets_class).float().mean().item()
     
     return total_loss.item(), acc
 
@@ -205,9 +168,29 @@ def train_model(model_name, model, max_steps=1000, device='cuda'):
                 
     return history
 
+def filter_valid_data(lengths, acc_data, mem_data):
+    """Filtrar datos válidos (no None) para graficar después de OOM"""
+    valid_lengths = []
+    valid_acc = []
+    valid_mem = []
+    oom_point = None
+    
+    for i, (L, acc, mem) in enumerate(zip(lengths, acc_data, mem_data)):
+        if acc is not None and mem is not None:
+            valid_lengths.append(L)
+            valid_acc.append(acc)
+            valid_mem.append(mem)
+        else:
+            oom_point = L if oom_point is None else oom_point
+            break
+    
+    return valid_lengths, valid_acc, valid_mem, oom_point
+
 def evaluate_scaling(model_name, model, lengths, device='cuda'):
     model.eval()
     results = {"acc": [], "mem": []}
+    max_length = None
+    oom_encountered = False
     
     console.print(f"\n[bold yellow][GFN:BENCH][/] Evaluating [cyan]{model_name}[/] Scaling Dynamics...")
     
@@ -216,7 +199,14 @@ def evaluate_scaling(model_name, model, lengths, device='cuda'):
     table.add_column("Accuracy", justify="center")
     table.add_column("Peak VRAM", justify="right")
 
-    for L in lengths:
+    for i, L in enumerate(lengths):
+        if oom_encountered:
+            # Si ya encontramos OOM, marcar los restantes como "OOM"
+            table.add_row(str(L), "[red]OOM[/]", "[red]N/A[/]")
+            results["acc"].append(None)  # None indica OOM
+            results["mem"].append(None)
+            continue
+            
         task = ParityTask(length=L)
         x, y_class, y_angle = task.generate_batch(100, device=device)
         
@@ -241,16 +231,41 @@ def evaluate_scaling(model_name, model, lengths, device='cuda'):
                 else:
                     return model(x).argmax(dim=-1)
 
-        mem = PerformanceStats.measure_peak_memory(model, run_inf)
-        preds = run_inf()
-        acc = (preds == y_class).float().mean().item()
-        
-        results["acc"].append(acc)
-        results["mem"].append(mem)
-        
-        acc_str = f"[bold green]{acc*100:.1f}%[/]" if acc > 0.9 else f"{acc*100:.1f}%"
-        table.add_row(str(L), acc_str, f"{mem:.2f} MB")
-        torch.cuda.empty_cache()
+        try:
+            mem = PerformanceStats.measure_peak_memory(model, run_inf)
+            preds = run_inf()
+            acc = (preds == y_class).float().mean().item()
+            
+            results["acc"].append(acc)
+            results["mem"].append(mem)
+            
+            acc_str = f"[bold green]{acc*100:.1f}%[/]" if acc > 0.9 else f"{acc*100:.1f}%"
+            table.add_row(str(L), acc_str, f"{mem:.2f} MB")
+            max_length = L  # Actualizar la longitud máxima exitosa
+            
+        except torch.cuda.OutOfMemoryError as e:
+            console.print(f"[bold red]OOM[/] at length {L} for {model_name}: {str(e)}")
+            table.add_row(str(L), "[red]OOM[/]", "[red]N/A[/]")
+            results["acc"].append(None)  # None indica OOM
+            results["mem"].append(None)
+            oom_encountered = True
+            max_length = lengths[i-1] if i > 0 else 0  # La anterior fue la última exitosa
+            
+        except Exception as e:
+            console.print(f"[bold red]Error[/] at length {L} for {model_name}: {str(e)}")
+            table.add_row(str(L), "[red]ERROR[/]", "[red]N/A[/]")
+            results["acc"].append(None)
+            results["mem"].append(None)
+            oom_encountered = True
+            max_length = lengths[i-1] if i > 0 else 0
+            
+        finally:
+            torch.cuda.empty_cache()
+            if device == 'cuda':
+                torch.cuda.synchronize()
+    
+    if max_length is not None:
+        console.print(f"[bold yellow]Maximum successful length for {model_name}: {max_length}[/]")
     
     console.print(table)
     return results
@@ -297,6 +312,13 @@ def run_superiority_benchmark():
     s_m = evaluate_scaling("Manifold-GFN", manifold, lengths, device)
     s_g = evaluate_scaling("Transformer-GPT", gpt, lengths, device)
     
+    # Filtrar datos válidos (manejar OOM)
+    lengths_m, acc_m, mem_m, oom_m = filter_valid_data(lengths, s_m["acc"], s_m["mem"])
+    lengths_g, acc_g, mem_g, oom_g = filter_valid_data(lengths, s_g["acc"], s_g["mem"])
+    
+    console.print(f"[bold cyan]Manifold-GFN:[/] {len(lengths_m)}/{len(lengths)} successful runs" + (f" (OOM at {oom_m})" if oom_m else ""))
+    console.print(f"[bold cyan]Transformer-GPT:[/] {len(lengths_g)}/{len(lengths)} successful runs" + (f" (OOM at {oom_g})" if oom_g else ""))
+    
     # 4. Dashboard Plotting (Cyberpunk Premium Styling)
     sns.set_theme(style="darkgrid", rc={"axes.facecolor": "#121212", "grid.color": "#2a2a2a"})
     plt.rcParams.update({
@@ -328,19 +350,23 @@ def run_superiority_benchmark():
     ax.set_title("Learning Dynamics", fontweight='bold', fontsize=18, color='white')
     ax.legend(facecolor='#1e1e1e', edgecolor=cols[0], labelcolor='white')
 
-    # Plot C: OOD Generalization
+    # Plot C: OOD Generalization (con datos filtrados)
     ax = axes[1, 0]
-    ax.plot(lengths, s_m["acc"], 'o-', color=cols[0], label='Manifold GFN', linewidth=5, markersize=12, markerfacecolor='white')
-    ax.plot(lengths, s_g["acc"], 's--', color=cols[1], label='Transformer', linewidth=5, markersize=12, alpha=0.6)
+    if len(lengths_m) > 0:
+        ax.plot(lengths_m, acc_m, 'o-', color=cols[0], label='Manifold GFN', linewidth=5, markersize=12, markerfacecolor='white')
+    if len(lengths_g) > 0:
+        ax.plot(lengths_g, acc_g, 's--', color=cols[1], label='Transformer', linewidth=5, markersize=12, alpha=0.6)
     ax.set_title("OOD Stability (Context Scaling)", fontweight='bold', fontsize=18, color='white')
     ax.set_xlabel("Sequence Length")
     ax.set_ylabel("Accuracy")
     ax.legend(facecolor='#1e1e1e', edgecolor=cols[0], labelcolor='white')
 
-    # Plot D: VRAM
+    # Plot D: VRAM (con datos filtrados)
     ax = axes[1, 1]
-    ax.plot(lengths, s_m["mem"], 'o-', color=cols[0], label='Manifold (Streaming)', linewidth=5, markersize=12, markerfacecolor='white')
-    ax.plot(lengths, s_g["mem"], 's--', color=cols[1], label='Transformer (Global)', linewidth=5, markersize=12, alpha=0.6)
+    if len(lengths_m) > 0:
+        ax.plot(lengths_m, mem_m, 'o-', color=cols[0], label='Manifold (Streaming)', linewidth=5, markersize=12, markerfacecolor='white')
+    if len(lengths_g) > 0:
+        ax.plot(lengths_g, mem_g, 's--', color=cols[1], label='Transformer (Global)', linewidth=5, markersize=12, alpha=0.6)
     ax.set_title("Memory Constraints", fontweight='bold', fontsize=18, color='white')
     ax.set_yscale('log')
     ax.set_xlabel("Sequence Length")
