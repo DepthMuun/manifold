@@ -44,4 +44,4 @@ To ensure stable training of Recurrent Manifold models, researchers should adher
 
 ---
 **Lead AI Engineer**  
-Google Deepmind | Advanced Agentic Coding Team
+Manifold Laboratory

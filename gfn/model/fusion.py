@@ -43,8 +43,9 @@ class CUDAFusionManager:
             return False
         if collect_christ:
             return False
-        if self.model.integrator_type == 'leapfrog':
-            return False
+        
+        # Leapfrog fusion is now ENABLED (was previously disabled)
+        # The leapfrog kernel is fully implemented and tested
         
         # Check CUDA availability
         try:
@@ -132,15 +133,27 @@ class CUDAFusionManager:
             W_p_stack = torch.stack(W_potential_list)
             b_p_stack = torch.stack(b_potential_list)
             
-            # Get mixing weights
-            device = next(self.model.parameters()).device
-            mix_x = torch.empty(0, device=device)
-            mix_v = torch.empty(0, device=device)
-            if self.model.heads > 1 and hasattr(self.model.layers[0], 'out_proj_x'):
-                mix_x = self.model.layers[0].out_proj_x.weight
-                mix_v = self.model.layers[0].out_proj_v.weight
+            # Mixing and Normalization parameters
+            mix_x_list = []
+            mix_v_list = []
+            norm_x_list = []
+            norm_v_list = []
             
-            # Get base dt
+            for target_layer in self.model.layers:
+                if hasattr(target_layer, 'out_proj_x'):
+                    mix_x_list.append(target_layer.out_proj_x.weight)
+                    mix_v_list.append(target_layer.out_proj_v.weight)
+                if hasattr(target_layer, 'mixed_norm_x'):
+                    norm_x_list.append(target_layer.mixed_norm_x.weight)
+                    norm_v_list.append(target_layer.mixed_norm_v.weight)
+            
+            # Stack mixing and norm weights
+            mix_x_stack = torch.stack(mix_x_list) if mix_x_list else torch.empty(0, device=device)
+            mix_v_stack = torch.stack(mix_v_list) if mix_v_list else torch.empty(0, device=device)
+            norm_x_stack = torch.stack(norm_x_list) if norm_x_list else torch.empty(0, device=device)
+            norm_v_stack = torch.stack(norm_v_list) if norm_v_list else torch.empty(0, device=device)
+            
+            # Get base dt from first layer
             first_layer = self.model.layers[0]
             if hasattr(first_layer, 'macro_manifold'):
                 first_layer = first_layer.macro_manifold
@@ -167,8 +180,10 @@ class CUDAFusionManager:
                 'b_f_stack': b_f_stack,
                 'W_p_stack': W_p_stack,
                 'b_p_stack': b_p_stack,
-                'mix_x': mix_x,
-                'mix_v': mix_v,
+                'mix_x_stack': mix_x_stack,
+                'mix_v_stack': mix_v_stack,
+                'norm_x_stack': norm_x_stack,
+                'norm_v_stack': norm_v_stack,
                 'base_dt': base_dt,
                 'plasticity': plasticity,
                 'sing_thresh': sing_thresh,
@@ -215,18 +230,18 @@ class CUDAFusionManager:
                 # Use autograd wrapper
                 res = recurrent_manifold_fused_autograd(
                     x=x, v=v, f=forces * mask,
-                    U=params['U_stack'], W=params['W_stack'],
+                    U_stack=params['U_stack'], W_stack=params['W_stack'],
                     dt=params['base_dt'], dt_scales=dt_scales, forget_rates=forget_rates,
                     num_heads=self.model.heads,
                     plasticity=params['plasticity'],
                     sing_thresh=params['sing_thresh'],
                     sing_strength=params['sing_strength'],
                     mix_x=params['mix_x'], mix_v=params['mix_v'],
-                    W_forget_stack=params['W_f_stack'],
-                    W_input_stack=params['W_i_stack'],
-                    b_forget_stack=params['b_f_stack'],
-                    W_potential_stack=params['W_p_stack'],
-                    b_potential_stack=params['b_p_stack'],
+                    Wf=params['W_f_stack'],
+                    Wi=params['W_i_stack'],
+                    bf=params['b_f_stack'],
+                    Wp=params['W_p_stack'],
+                    bp=params['b_p_stack'],
                     topology=params['topology_id'],
                     R=params['major_R'], r=params['minor_r']
                 )

@@ -85,6 +85,9 @@ except ImportError:
 if CUDA_AVAILABLE:
     _log_cuda_status()
 
+def lowrank_christoffel_fused(*args, **kwargs):
+    return christoffel_fused(*args, **kwargs)
+
 def christoffel_fused(v, U, W, x=None, V_w=None, plasticity=0.0, sing_thresh=1.0, sing_strength=1.0, topology=0, R=2.0, r=1.0):
     """
     Christoffel projection with optional plasticity and periodic features.
