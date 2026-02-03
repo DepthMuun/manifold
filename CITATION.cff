@@ -7,7 +7,7 @@ authors:
     affiliation: "Manifold Laboratory"
     orcid: ""
 title: "Manifold: Geometric Sequence Modeling via Symplectic Flows"
-version: "2.6.4"
+version: "2.6.5-lite"
 doi: ""
 date-released: 2026-02-03
 url: "https://github.com/Manifold-Laboratory/manifold"
@@ -27,4 +27,4 @@ keywords:
   - "transformer alternative"
   - "manifold learning"
   - "riemannian geometry"
-commit: "v2.6.4"
+commit: "v2.6.5-lite"

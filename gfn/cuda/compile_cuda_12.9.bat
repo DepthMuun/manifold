@@ -46,7 +46,6 @@ REM Fix for "It seems that the VC environment is activated..." warning
 set DISTUTILS_USE_SDK=1
 
 
-
 python  setup.py build_ext --inplace 
 
 if %errorlevel% neq 0 (
