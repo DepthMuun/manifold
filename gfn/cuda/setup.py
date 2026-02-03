@@ -11,6 +11,7 @@ cuda_sources = [
     # Geometry kernels
     'src/geometry/lowrank_christoffel.cu',
     'src/geometry/lowrank_christoffel_backward.cu',
+    'src/geometry/lowrank_christoffel_friction_backward.cu',
     # Integrator kernels - Symplectic
     'src/integrators/symplectic/leapfrog_fused.cu',
     'src/integrators/symplectic/leapfrog_backward.cu',
@@ -39,21 +40,16 @@ nvcc_flags = [
     "--use_fast_math",
     "--expt-relaxed-constexpr",
     "-gencode=arch=compute_75,code=sm_75",
-    "-gencode=arch=compute_80,code=sm_80",
-    "-gencode=arch=compute_86,code=sm_86",
-    "-gencode=arch=compute_89,code=sm_89",
 ]
 
 if is_windows:
-    cxx_flags = ["/O2", "/bigobj", "/EHsc", "/Zm2000", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN"]
+    cxx_flags = ["/O2", "/bigobj", "/EHsc", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN"]
     nvcc_flags = [
         "-O3",
         "--use_fast_math",
         "--expt-relaxed-constexpr",
         "-Xcompiler",
         "/bigobj",
-        "-Xcompiler",
-        "/Zm2000",
         "-Xcompiler",
         "/EHsc",
         "-Xcompiler",

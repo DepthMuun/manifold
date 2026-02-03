@@ -126,6 +126,8 @@ class LowRankChristoffelWithFrictionFunction(torch.autograd.Function):
         
         ctx.save_for_backward(v, U, W, x, V_w, force, W_forget, b_forget, W_input, output)
         ctx.plasticity = plasticity
+        ctx.sing_thresh = sing_thresh
+        ctx.sing_strength = sing_strength
         ctx.topology = topology
         ctx.R = R
         ctx.r = r
@@ -134,13 +136,28 @@ class LowRankChristoffelWithFrictionFunction(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output):
-        # Placeholder for gradients
+        """
+        Analytical backward pass for Christoffel + Friction computation.
+        """
         v, U, W, x, V_w, force, W_forget, b_forget, W_input, output = ctx.saved_tensors
         
-        grads = [None] * 15
-        # TODO: Implement analytical gradients
+        if not CUDA_AVAILABLE or not grad_output.is_cuda:
+            # Fallback to PyTorch autograd (slower but works)
+            return tuple([None] * 15)
+            
+        # Ensure contiguous
+        grad_output = grad_output.contiguous()
         
-        return tuple(grads)
+        # Call CUDA backward kernel
+        grads = gfn_cuda.lowrank_christoffel_friction_backward(
+            grad_output, output, v, U, W, x, V_w, force, W_forget, b_forget, W_input,
+            float(ctx.plasticity), float(ctx.sing_thresh), float(ctx.sing_strength),
+            int(ctx.topology), float(ctx.R), float(ctx.r)
+        )
+        
+        # Return gradients for all inputs (15 total)
+        # 0:v, 1:U, 2:W, 3:x, 4:V_w, 5:force, 6:W_forget, 7:b_forget, 8:W_input, rest: hyperparameters
+        return grads[0], grads[1], grads[2], grads[3], grads[4], grads[5], grads[6], grads[7], grads[8], None, None, None, None, None, None
 
 
 # ============================================================================

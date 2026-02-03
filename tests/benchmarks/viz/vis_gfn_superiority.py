@@ -383,7 +383,15 @@ def run_superiority_benchmark():
     summary_table.add_column("Transformer", justify="center")
     summary_table.add_column("Verdict", justify="right")
     
-    summary_table.add_row("Long Context (5k)", f"{s_m['acc'][-1]*100:.1f}%", f"{s_g['acc'][-1]*100:.1f}%", "[bold green]GFN[/]" if s_m['acc'][-1] > s_g['acc'][-1] else "Transformer")
+    # Manejar OOM en el reporte final
+    acc_m_final = s_m['acc'][-1] if s_m['acc'][-1] is not None else 0.0
+    acc_g_final = s_g['acc'][-1] if s_g['acc'][-1] is not None else 0.0
+    
+    m_str = f"{acc_m_final*100:.1f}%" if s_m['acc'][-1] is not None else "[red]OOM[/]"
+    g_str = f"{acc_g_final*100:.1f}%" if s_g['acc'][-1] is not None else "[red]OOM[/]"
+    target_l = lengths[-1]
+    
+    summary_table.add_row(f"Long Context ({target_l})", m_str, g_str, "[bold green]GFN[/]" if acc_m_final > acc_g_final else "Transformer")
     summary_table.add_row("Memory Complexity", "O(1)", "O(N²)", "[bold green]GFN[/]")
     summary_table.add_row("Training Bias", "Hamiltonian", "Empirical", "[bold blue]ISOMORPHIC[/]")
     

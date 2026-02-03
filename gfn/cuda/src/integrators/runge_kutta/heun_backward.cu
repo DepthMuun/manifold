@@ -51,7 +51,6 @@ __global__ void heun_backward_kernel(
     scalar_t* gU_b = grad_U + idx * dim * rank;
     scalar_t* gW_b = grad_W + idx * dim * rank;
     scalar_t* gf_b = grad_force + idx * dim;
-    const scalar_t* f_ptr = force + idx * dim;
 
     for (int i = 0; i < dim * rank; ++i) { gU_b[i] = 0; gW_b[i] = 0; }
     for (int i = 0; i < dim; ++i) { gf_b[i] = 0; }

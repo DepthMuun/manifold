@@ -26,6 +26,26 @@ torch::Tensor lowrank_christoffel_with_friction(
     int topology, float R, float r
 );
 
+std::vector<torch::Tensor> lowrank_christoffel_friction_backward_cuda(
+    torch::Tensor grad_out,
+    torch::Tensor output,
+    torch::Tensor v,
+    torch::Tensor U,
+    torch::Tensor W,
+    torch::Tensor x,
+    torch::Tensor V_w,
+    torch::Tensor force,
+    torch::Tensor W_forget,
+    torch::Tensor b_forget,
+    torch::Tensor W_input,
+    double plasticity,
+    double sing_thresh,
+    double sing_strength,
+    int topology,
+    double R,
+    double r
+);
+
 // Integrator kernels
 std::vector<torch::Tensor> leapfrog_fused(
     torch::Tensor x, torch::Tensor v, torch::Tensor force,
@@ -86,6 +106,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("lowrank_christoffel_with_friction", &lowrank_christoffel_with_friction,
           "Low-rank Christoffel with friction (CUDA)",
           py::arg("v"), py::arg("U"), py::arg("W"),
+          py::arg("x"), py::arg("V_w"), py::arg("force"),
+          py::arg("W_forget"), py::arg("b_forget"), py::arg("W_input"),
+          py::arg("plasticity"), py::arg("sing_thresh"), py::arg("sing_strength"),
+          py::arg("topology"), py::arg("R"), py::arg("r"));
+
+    m.def("lowrank_christoffel_friction_backward", &lowrank_christoffel_friction_backward_cuda,
+          "Analytical backward pass for Christoffel with friction (CUDA)",
+          py::arg("grad_out"), py::arg("output"), py::arg("v"), py::arg("U"), py::arg("W"),
           py::arg("x"), py::arg("V_w"), py::arg("force"),
           py::arg("W_forget"), py::arg("b_forget"), py::arg("W_input"),
           py::arg("plasticity"), py::arg("sing_thresh"), py::arg("sing_strength"),
