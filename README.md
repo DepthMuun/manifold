@@ -14,6 +14,51 @@
 
 ---
 
+## Documentation
+
+Manifold provides comprehensive documentation to help users understand, implement, and extend the Geometric Flow Network architecture. The documentation is organized into several guides covering different aspects of the system.
+
+### Getting Started
+
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting-started.md) | Complete guide to installing, configuring, and running your first Manifold model. Covers environment setup, basic configuration, and quick-start examples. |
+| [Tutorial](docs/tutorial.md) | Step-by-step tutorial demonstrating how to build a complete sequence modeling project using Manifold. Includes practical code examples and best practices. |
+
+### Core Concepts
+
+| Guide | Description |
+|-------|-------------|
+| [Mathematical Foundations](docs/mathematical-foundations.md) | In-depth exploration of the geometric mechanics principles underlying Manifold. Covers Hamiltonian dynamics, symplectic flows, Riemannian geometry, and the physical interpretation of sequence modeling. |
+| [Architecture](docs/architecture.md) | Comprehensive technical reference describing the system architecture, components, data flow, and implementation details. Essential for understanding how Manifold processes sequences internally. |
+
+### Reference & Advanced Topics
+
+| Guide | Description |
+|-------|-------------|
+| [API Reference](docs/API.md) | Complete API documentation for all Manifold modules, classes, and functions. Includes parameter descriptions, return values, and usage examples for integration into production systems. |
+| [Benchmarking](docs/benchmarking.md) | Detailed documentation of performance evaluations and comparison studies. Covers methodology, metrics, datasets, and results comparing Manifold against Transformers, Mamba, and other state space models. |
+| [Troubleshooting](docs/troubleshooting.md) | Solutions to common issues, numerical instability guides, performance optimization tips, and frequently asked questions. Essential for debugging and production deployment. |
+
+### Documentation Map
+
+```
+├── Getting Started
+│   ├── Installation & Setup
+│   └── Quick Start Tutorial
+│
+├── Core Concepts
+│   ├── Mathematical Foundations
+│   └── Architecture Deep Dive
+│
+├── Reference
+│   ├── API Documentation
+│   ├── Benchmarking Results
+│   └── Troubleshooting Guide
+```
+
+---
+
 ## 1. Introduction: The Memory Bottleneck
 
 The fundamental limitation of modern Large Language Models (LLMs) is the **Key-Value (KV) Cache**. To generate the next token, a Transformer must explicitly attend to its entire history. This results in a memory complexity of $O(N)$, creating a hard physical ceiling on context length and inference throughput.
