@@ -20,7 +20,7 @@ First, navigate to the main Manifold repository page on GitHub and click the "Fo
 
 ```bash
 # Clone your forked repository
-git clone https://github.com/YOUR-USERNAME/manifold.git
+git clone https://github.com/Manifold-Laboratory/manifold.git
 cd manifold
 
 # Install in development mode with all dependencies

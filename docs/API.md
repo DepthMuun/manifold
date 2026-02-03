@@ -1,6 +1,6 @@
 # Manifold API Reference
 
-**Version:** 2.6.4 "Symplectic Forgetting"  
+**Version:** 2.6.5 
 **Last Updated:** February 2026  
 **API Stability:** Beta (breaking changes possible)
 
