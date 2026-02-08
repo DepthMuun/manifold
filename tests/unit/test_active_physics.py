@@ -120,13 +120,13 @@ class TestActivePhysics(unittest.TestCase):
         
         # Forward pass
         input_ids = torch.randint(0, 10, (1, 5))
-        logits, state = model(input_ids)
+        logits = model(input_ids)[0]
         
         self.assertEqual(logits.shape, (1, 5, 10))
         
     def test_parallel_layer_init(self):
         """Test if ParallelMLayer accepts physics_config without crashing."""
-        from src.layers import ParallelMLayer
+        from gfn.layers import ParallelMLayer
         try:
             layer = ParallelMLayer(dim=32, heads=4, physics_config=self.config)
             # ParallelMLayer currently doesn't implement active inference, 

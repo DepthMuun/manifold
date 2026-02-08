@@ -1,7 +1,7 @@
 torch>=2.0.0
 transformers
 datasets
-pynvml
+nvidia-ml-py
 matplotlib
 numpy
 torchdiffeq

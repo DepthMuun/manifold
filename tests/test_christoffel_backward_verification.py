@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Test de verificación numérica para el backward de LowRankChristoffelWithFrictionFunction.
-Compara gradientes CUDA con gradientes numéricos calculados en Python.
+Numerical verification test for LowRankChristoffelWithFrictionFunction backward pass.
+Compares CUDA gradients with numerical gradients calculated in Python.
 """
 
 import torch
@@ -20,33 +20,33 @@ try:
     from gfn.cuda.ops import christoffel_fused
 except ImportError:
     CUDA_AVAILABLE = False
-    print("CUDA no disponible, omitiendo test de verificación")
+    print("CUDA not available, skipping verification test")
 
 def compute_numerical_gradients(func, inputs, output_indices=None, eps=1e-5):
     """
-    Calcula gradientes numéricos usando diferencias finitas.
+    Computes numerical gradients using finite differences.
     
     Args:
-        func: Función a evaluar
-        inputs: Lista de tensores de entrada
-        output_indices: Índices de salida a considerar (None = todos)
-        eps: Tamaño del paso para diferencias finitas
+        func: Function to evaluate
+        inputs: List of input tensors
+        output_indices: Output indices to consider (None = all)
+        eps: Step size for finite differences
     
     Returns:
-        Lista de gradientes numéricos para cada entrada
+        List of numerical gradients for each input
     """
     gradients = []
     
-    # Evaluar función original
+    # Evaluate original function
     outputs = func(*inputs)
     if isinstance(outputs, torch.Tensor):
         outputs = [outputs]
     
-    # Seleccionar outputs a considerar
+    # Select outputs to consider
     if output_indices is not None:
         outputs = [outputs[i] for i in output_indices]
     
-    # Para cada input
+    # For each input
     for i, input_tensor in enumerate(inputs):
         if input_tensor.numel() == 0 or not input_tensor.requires_grad:
             gradients.append(None)
@@ -55,13 +55,13 @@ def compute_numerical_gradients(func, inputs, output_indices=None, eps=1e-5):
         grad = torch.zeros_like(input_tensor)
         original_data = input_tensor.data.clone()
         
-        # Aplanar para facilitar iteración
+        # Flatten to facilitate iteration
         flat_input = input_tensor.view(-1)
         flat_grad = grad.view(-1)
         original_flat = original_data.view(-1)
         
         for j in range(flat_input.numel()):
-            # Diferencia central para mayor precisión
+            # Central difference for higher precision
             original_flat[j] += eps
             input_tensor.data = original_flat.view(input_tensor.shape)
             outputs_plus = func(*inputs)
@@ -74,11 +74,11 @@ def compute_numerical_gradients(func, inputs, output_indices=None, eps=1e-5):
             if isinstance(outputs_minus, torch.Tensor):
                 outputs_minus = [outputs_minus]
             
-            # Restaurar original
+            # Restore original
             original_flat[j] += eps
             input_tensor.data = original_flat.view(input_tensor.shape)
             
-            # Calcular gradientes para cada output seleccionado
+            # Calculate gradients for each selected output
             grad_sum = 0.0
             for k, (plus, minus) in enumerate(zip(outputs_plus, outputs_minus)):
                 if plus.numel() > 0 and minus.numel() > 0:
@@ -92,38 +92,38 @@ def compute_numerical_gradients(func, inputs, output_indices=None, eps=1e-5):
     return gradients
 
 def test_backward_vs_numerical():
-    """Test que compara backward CUDA con gradientes numéricos."""
+    """Test comparing CUDA backward with numerical gradients."""
     if not CUDA_AVAILABLE or not torch.cuda.is_available():
-        print("CUDA no disponible, omitiendo test")
+        print("CUDA not available, skipping test")
         return False
     
     print("=" * 70)
-    print("TEST: Backward CUDA vs Gradientes Numéricos")
+    print("TEST: Backward CUDA vs Numerical Gradients")
     print("=" * 70)
     
-    # Parámetros de test
+    # Test parameters
     batch_size = 3
     dim = 6
     rank = 4
     device = torch.device('cuda')
     
-    # Semilla para reproducibilidad
+    # Seed for reproducibility
     torch.manual_seed(42)
     
-    print(f"Configuración: batch={batch_size}, dim={dim}, rank={rank}")
+    print(f"Configuration: batch={batch_size}, dim={dim}, rank={rank}")
     
-    # Crear inputs de test
+    # Create test inputs
     v = torch.randn(batch_size, dim, device=device, requires_grad=True, dtype=torch.float64)
     U = torch.randn(dim, rank, device=device, requires_grad=True, dtype=torch.float64)
     W = torch.randn(dim, rank, device=device, requires_grad=True, dtype=torch.float64)
     x = torch.randn(batch_size, dim, device=device, requires_grad=True, dtype=torch.float64)
     V_w = torch.randn(dim, device=device, requires_grad=True, dtype=torch.float64)
     force = torch.randn(batch_size, dim, device=device, requires_grad=True, dtype=torch.float64)
-    W_forget = torch.randn(dim, 2*dim, device=device, requires_grad=True, dtype=torch.float64)  # Para topología Torus
+    W_forget = torch.randn(dim, 2*dim, device=device, requires_grad=True, dtype=torch.float64)  # For Torus topology
     b_forget = torch.randn(dim, device=device, requires_grad=True, dtype=torch.float64)
     W_input = torch.randn(dim, dim, device=device, requires_grad=True, dtype=torch.float64)
     
-    # Hiperparámetros
+    # Hyperparameters
     plasticity = 0.1
     sing_thresh = 0.5
     sing_strength = 2.0
@@ -131,12 +131,12 @@ def test_backward_vs_numerical():
     R = 2.0
     r = 1.0
     
-    print(f"Hiperparámetros: plasticity={plasticity}, sing_thresh={sing_thresh}, sing_strength={sing_strength}")
-    print(f"Topología: {topology} (Torus), R={R}, r={r}")
+    print(f"Hyperparameters: plasticity={plasticity}, sing_thresh={sing_thresh}, sing_strength={sing_strength}")
+    print(f"Topology: {topology} (Torus), R={R}, r={r}")
     print()
     
-    # Test 1: Verificar forward pass
-    print("1. Verificando forward pass...")
+    # Test 1: Verify forward pass
+    print("1. Verifying forward pass...")
     
     # Forward CUDA
     output_cuda = LowRankChristoffelWithFrictionFunction.apply(
@@ -146,43 +146,43 @@ def test_backward_vs_numerical():
     
     # Forward Python (fallback)
     try:
-        # Usar christoffel_fused para la parte de Christoffel
+        # Use christoffel_fused for the Christoffel part
         gamma = christoffel_fused(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology, R, r)
         
-        # Agregar fricción (simplificado)
+        # Add friction (simplified)
         if force is not None and W_forget is not None and b_forget is not None:
-            # Calcular coeficiente de fricción (simplificado)
+            # Calculate friction coefficient (simplified)
             features = torch.cat([torch.sin(x), torch.cos(x)], dim=-1) if topology == 1 else x
             mu = torch.sigmoid(torch.matmul(features, W_forget.t()) + b_forget) * 5.0  # FRICTION_SCALE
             friction_output = gamma + mu * v
         else:
             friction_output = gamma
         
-        # Comparar
+        # Compare
         forward_diff = torch.abs(output_cuda - friction_output).max().item()
-        print(f"   Diferencia máxima forward: {forward_diff:.2e}")
+        print(f"   Forward max difference: {forward_diff:.2e}")
         
         if forward_diff > 1e-4:
-            print("   ⚠️  ADVERTENCIA: Diferencia significativa en forward")
+            print("   ⚠️  WARNING: Significant difference in forward")
         else:
-            print("   ✅ Forward consistente")
+            print("   ✅ Forward consistent")
             
     except Exception as e:
-        print(f"   ⚠️  No se pudo comparar con Python: {e}")
+        print(f"   ⚠️  Could not compare with Python: {e}")
     
     print()
     
-    # Test 2: Comparar backward
-    print("2. Verificando backward pass...")
+    # Test 2: Compare backward
+    print("2. Verifying backward pass...")
     
-    # Crear función de pérdida simple
+    # Create simple loss function
     loss = output_cuda.sum()
     
-    # Calcular gradientes con backward CUDA
+    # Calculate gradients with CUDA backward
     grad_output = torch.ones_like(output_cuda)
     grads_cuda = LowRankChristoffelWithFrictionFunction.backward(None, grad_output)
     
-    # Función para gradientes numéricos
+    # Function for numerical gradients
     def forward_func(v, U, W, x, V_w, force, W_forget, b_forget, W_input):
         return LowRankChristoffelWithFrictionFunction.apply(
             v, U, W, x, V_w, force, W_forget, b_forget, W_input,
@@ -192,28 +192,28 @@ def test_backward_vs_numerical():
     inputs = [v, U, W, x, V_w, force, W_forget, b_forget, W_input]
     grads_numerical = compute_numerical_gradients(forward_func, inputs)
     
-    # Comparar gradientes
+    # Compare gradients
     param_names = ['v', 'U', 'W', 'x', 'V_w', 'force', 'W_forget', 'b_forget', 'W_input']
-    tolerances = [1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3]  # Tolerancias por parámetro
+    tolerances = [1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3]  # Tolerances per parameter
     
-    print("   Comparación de gradientes:")
+    print("   Gradient comparison:")
     max_errors = []
     
     for i, (name, grad_cuda, grad_num, tol) in enumerate(zip(param_names, grads_cuda, grads_numerical, tolerances)):
         if grad_cuda is None or grad_num is None:
-            print(f"   {name}: Omitido (None)")
+            print(f"   {name}: Skipped (None)")
             continue
             
         if grad_cuda.numel() == 0 or grad_num.numel() == 0:
-            print(f"   {name}: Omitido (vacío)")
+            print(f"   {name}: Skipped (empty)")
             continue
         
-        # Verificar formas
+        # Verify shapes
         if grad_cuda.shape != grad_num.shape:
-            print(f"   {name}: ❌ Forma inconsistente - CUDA: {grad_cuda.shape}, Numérico: {grad_num.shape}")
+            print(f"   {name}: ❌ Inconsistent shape - CUDA: {grad_cuda.shape}, Numerical: {grad_num.shape}")
             continue
         
-        # Calcular errores
+        # Calculate errors
         abs_diff = torch.abs(grad_cuda - grad_num)
         rel_diff = abs_diff / (torch.abs(grad_num) + 1e-8)
         
@@ -225,56 +225,56 @@ def test_backward_vs_numerical():
         max_errors.append(max_abs_error)
         
         print(f"   {name}:")
-        print(f"     Error absoluto máximo: {max_abs_error:.2e}")
-        print(f"     Error relativo máximo: {max_rel_error:.2e}")
-        print(f"     Error absoluto medio: {mean_abs_error:.2e}")
-        print(f"     Error relativo medio: {mean_rel_error:.2e}")
+        print(f"     Max absolute error: {max_abs_error:.2e}")
+        print(f"     Max relative error: {max_rel_error:.2e}")
+        print(f"     Mean absolute error: {mean_abs_error:.2e}")
+        print(f"     Mean relative error: {mean_rel_error:.2e}")
         
-        # Verificar si está dentro de tolerancia
+        # Verify if within tolerance
         if max_abs_error <= tol and max_rel_error <= 10 * tol:
-            print(f"     ✅ DENTRO DE TOLERANCIA ({tol})")
+            print(f"     ✅ WITHIN TOLERANCE ({tol})")
         else:
-            print(f"     ❌ FUERA DE TOLERANCIA ({tol})")
+            print(f"     ❌ OUT OF TOLERANCE ({tol})")
             
-            # Mostrar algunos valores problemáticos
+            # Show some problematic values
             if max_abs_error > tol:
                 max_idx = torch.argmax(abs_diff)
                 cuda_val = grad_cuda.view(-1)[max_idx].item()
                 num_val = grad_num.view(-1)[max_idx].item()
-                print(f"     Valor CUDA en índice {max_idx}: {cuda_val:.6e}")
-                print(f"     Valor numérico en índice {max_idx}: {num_val:.6e}")
+                print(f"     CUDA value at index {max_idx}: {cuda_val:.6e}")
+                print(f"     Numerical value at index {max_idx}: {num_val:.6e}")
         
         print()
     
-    # Resumen
-    print("3. Resumen:")
+    # Summary
+    print("3. Summary:")
     if max_errors:
         overall_max_error = max(max_errors)
-        print(f"   Error máximo global: {overall_max_error:.2e}")
+        print(f"   Global max error: {overall_max_error:.2e}")
         
         if overall_max_error < 1e-3:
-            print("   ✅ TEST APROBADO: Los gradientes CUDA coinciden con los numéricos")
+            print("   ✅ TEST PASSED: CUDA gradients match numerical gradients")
             return True
         else:
-            print("   ❌ TEST FALLIDO: Diferencias significativas detectadas")
+            print("   ❌ TEST FAILED: Significant differences detected")
             return False
     else:
-        print("   ⚠️  No se pudieron comparar gradientes")
+        print("   ⚠️  Could not compare gradients")
         return False
 
 def test_gradient_checking_pytorch():
-    """Test usando gradcheck de PyTorch."""
+    """Test using PyTorch gradcheck."""
     if not CUDA_AVAILABLE or not torch.cuda.is_available():
-        print("CUDA no disponible, omitiendo gradcheck")
+        print("CUDA not available, skipping gradcheck")
         return
     
     print("\n" + "=" * 70)
-    print("TEST: Gradient Checking con PyTorch")
+    print("TEST: Gradient Checking with PyTorch")
     print("=" * 70)
     
     from torch.autograd import gradcheck
     
-    # Crear inputs pequeños para gradcheck
+    # Create small inputs for gradcheck
     batch_size = 2
     dim = 4
     rank = 2
@@ -282,7 +282,7 @@ def test_gradient_checking_pytorch():
     
     torch.manual_seed(123)
     
-    # Crear inputs con requires_grad=True y dtype float64
+    # Create inputs with requires_grad=True and dtype float64
     v = torch.randn(batch_size, dim, device=device, requires_grad=True, dtype=torch.float64)
     U = torch.randn(dim, rank, device=device, requires_grad=True, dtype=torch.float64)
     W = torch.randn(dim, rank, device=device, requires_grad=True, dtype=torch.float64)
@@ -293,7 +293,7 @@ def test_gradient_checking_pytorch():
     b_forget = torch.randn(dim, device=device, requires_grad=True, dtype=torch.float64)
     W_input = torch.randn(dim, dim, device=device, requires_grad=True, dtype=torch.float64)
     
-    # Hiperparámetros
+    # Hyperparameters
     test_input = (v, U, W, x, V_w, force, W_forget, b_forget, W_input, 
                  0.1, 0.5, 2.0, 1, 2.0, 1.0)
     
@@ -308,13 +308,13 @@ def test_gradient_checking_pytorch():
         )
         
         if result:
-            print("✅ Gradcheck aprobado!")
+            print("✅ Gradcheck passed!")
         else:
-            print("❌ Gradcheck fallido!")
+            print("❌ Gradcheck failed!")
             
     except Exception as e:
-        print(f"Error en gradcheck: {e}")
-        print("Esto puede ser esperado si la función no es suficientemente diferenciable")
+        print(f"Error in gradcheck: {e}")
+        print("This might be expected if the function is not sufficiently differentiable")
 
 if __name__ == "__main__":
     print("INICIANDO TESTS DE VERIFICACIÓN CUDA")

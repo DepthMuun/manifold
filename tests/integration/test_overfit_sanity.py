@@ -42,7 +42,8 @@ def test_overfit_rtx_config():
     
     for i in range(100):
         optimizer.zero_grad()
-        logits, _ = model(x)
+        output = model(x)
+        logits = output[0]
         
         # Shift logits and targets
         # Logits: [B, T, V] -> Predict t+1

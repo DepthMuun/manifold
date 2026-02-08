@@ -130,8 +130,8 @@ config = {
 }
 
 # Initialize the model
-model = Manifold(
-    vocab_size=50257,  # Standard GPT-2 vocabulary size
+awqsdmodel = Manifold(
+    vocab_size=50257,  # Standard transformer vocabulary size
     dim=512,
     depth=6,
     heads=4,

@@ -30,7 +30,7 @@ class TestGoldenIntegration(unittest.TestCase):
         force = torch.randn(2, dim)
         
         # Run forward pass
-        x_out, v_out = layer(x, v, force=force)
+        x_out, v_out, _, _ = layer(x, v, force=force)
         
         # Check shapes
         self.assertEqual(x_out.shape, x.shape)

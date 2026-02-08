@@ -121,8 +121,11 @@ class GaugeChristoffel(nn.Module):
             nn.Tanh(),
             nn.Linear(128, 64),
             nn.Tanh(),
-            nn.Linear(64, gauge_dim)
+            nn.Linear(64, dim * gauge_dim * gauge_dim)
         )
+        
+        self.to_gauge = nn.Linear(dim, gauge_dim, bias=False)
+        self.from_gauge = nn.Linear(gauge_dim, dim, bias=False)
         
         # Learnable gauge coupling
         self.gauge_coupling = nn.Parameter(torch.tensor(0.1))
@@ -131,20 +134,23 @@ class GaugeChristoffel(nn.Module):
         """
         Compute F_μν = ∂_μ A_ν - ∂_ν A_μ + [A_μ, A_ν]
         """
-        A = self.A_net(x)
+        A = self.A_net(x).view(*x.shape[:-1], self.dim, self.gauge_dim, self.gauge_dim)
         
         # Compute Jacobian ∂_μ A_ν via automatic differentiation
         jac = torch.autograd.functional.jacobian(
             lambda x: self.A_net(x), x, create_graph=True
         )
         jac = jac.diagonal(dim1=0, dim2=2).permute(2, 0, 1)
+        jac = jac.view(*x.shape[:-1], self.dim, self.gauge_dim, self.gauge_dim)
         
+        dA = jac.unsqueeze(2) - jac.unsqueeze(1)
         if self.group == 'U1':
-            # Abelian case
-            F = jac.unsqueeze(2) - jac.unsqueeze(1)
+            F = dA
         else:
-            # Non-Abelian case (requires commutator)
-            raise NotImplementedError("Non-Abelian groups require tensor algebra")
+            A_mu = A.unsqueeze(2)
+            A_nu = A.unsqueeze(1)
+            commutator = A_mu @ A_nu - A_nu @ A_mu
+            F = dA + commutator
         
         return F
     
@@ -152,14 +158,13 @@ class GaugeChristoffel(nn.Module):
         """
         Parallel transport velocity v along gauge connection.
         """
-        A = self.A_net(x)
+        A = self.A_net(x).view(*x.shape[:-1], self.dim, self.gauge_dim, self.gauge_dim)
         
-        if self.group == 'U1':
-            # Phase rotation: exp(i A)
-            phase = torch.exp(1j * A.sum(dim=-1, keepdim=True))
-            return v * phase.real  # Project to real for real-valued networks
-        else:
-            raise NotImplementedError()
+        v_g = self.to_gauge(v)
+        A_v = torch.einsum("...m,...mij->...ij", v, A)
+        U = torch.matrix_exp(-self.gauge_coupling * A_v)
+        v_g_out = (U @ v_g.unsqueeze(-1)).squeeze(-1)
+        return self.from_gauge(v_g_out)
     
     def forward(self, v, x):
         """
@@ -289,7 +294,7 @@ Our gauge-theoretic framework provides a principled approach to semantic consist
 
 We have introduced gauge theory as a framework for semantic consistency in neural language models. By treating semantic transformations as gauge symmetries and deriving covariant derivatives for meaning-preserving transport, we achieve significant improvements in semantic consistency (+15-25%) while maintaining competitive performance on standard tasks.
 
-This work demonstrates that fundamental principles from theoretical physics—specifically, the requirement that physical laws be invariant under local transformations—can be productively applied to the design of more robust and interpretable AI systems.
+This work demonstrates that fundamental principles from theoretical physics—specifically, the requirement that physical laws be invariant under local transformations—can be productively applied to the design of more robust and interpretable computational systems.
 
 
 

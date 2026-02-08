@@ -343,7 +343,7 @@ The `vis_gfn_superiority.py` benchmark directly compares MANIFOLD against Transf
 | Model | Final Loss | Final Accuracy | Steps to Converge |
 |-------|------------|----------------|-------------------|
 | Manifold-GFN | <0.01 | 99.5% | ~500 |
-| Transformer-GPT | ~0.012 | 99.5% | ~4000 |
+| Transformer (decoder-only) | ~0.012 | 99.5% | ~4000 |
 
 ### 8.2 OOD Scaling
 

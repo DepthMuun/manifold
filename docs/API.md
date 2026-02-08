@@ -120,7 +120,7 @@ The following table provides detailed descriptions for all constructor parameter
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `vocab_size` | `int` | 50257 | Size of the token vocabulary. Determines the dimensionality of output logits and the expected range of input token indices. Standard GPT-2 vocabulary uses 50257 tokens. |
+| `vocab_size` | `int` | 50257 | Size of the token vocabulary. Determines the dimensionality of output logits and the expected range of input token indices. Standard transformer vocabulary uses 50257 tokens. |
 | `dim` | `int` | 256 | Latent manifold dimension (hidden size). All internal representations have this dimension. Larger values provide more capacity but increase computational cost. Typical values range from 128 to 2048. |
 | `depth` | `int` | 4 | Number of stacked M-Layers. Each layer applies a geodesic update to the state. Deeper models can represent more complex transformations but require more computation. Typical values range from 2 to 24. |
 | `heads` | `int` | 4 | Number of parallel geodesic flow heads. The model dimension must be divisible by the number of heads. More heads provide more parallel geodesic flows but increase parameter count. |

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from ..constants import FRICTION_SCALE, EPSILON_STRONG
 from .lowrank import LowRankChristoffel
 
 class HyperChristoffel(LowRankChristoffel):
@@ -31,10 +32,9 @@ class HyperChristoffel(LowRankChristoffel):
         nn.init.zeros_(self.gate_w.weight)
         nn.init.zeros_(self.gate_w.bias)
         
-    def forward(self, v, x=None):
+    def forward(self, v, x=None, force=None, **kwargs):
         if x is None:
-            # Fallback to static if no context provided (e.g. init or blind mode)
-            return super().forward(v, None)
+            return super().forward(v, None, force=force, **kwargs)
             
         # 1. Compute Context Gates
         # Range: [0, 2] - allowing to silence (0) or amplify (2) specific basis vectors
@@ -70,10 +70,41 @@ class HyperChristoffel(LowRankChristoffel):
         
         # e) Reconstruct force
         # out = sq_modulated @ W.T
-        out = torch.matmul(sq_modulated, self.W.t()) # [batch, dim]
+        gamma = torch.matmul(sq_modulated, self.W.t()) # [batch, dim]
         
-        # 3. Apply inherited Active Inference (Plasticity/Singularities)
-        # Note: HyperChristoffel currently inherits from LowRankChristoffel directly.
-        # Active inference features from ReactiveChristoffel are not automatically included unless explicitly mixed in.
-        
-        return torch.clamp(out, -self.clamp_val, self.clamp_val)
+        if self.is_torus:
+            x_in = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        else:
+            x_in = x
+
+        Wf = kwargs.get('W_forget_stack', None)
+        Wi = kwargs.get('W_input_stack', None)
+        bf = kwargs.get('b_forget_stack', None)
+
+        if Wf is not None and bf is not None:
+            if Wf.dim() == 3:
+                Wf = Wf[0]
+            if Wi is not None and Wi.dim() == 3:
+                Wi = Wi[0]
+            if bf.dim() == 2:
+                bf = bf[0]
+            gate_activ = torch.matmul(x_in, Wf.t()) + bf
+            if Wi is not None and force is not None:
+                gate_activ = gate_activ + torch.matmul(force, Wi.t())
+        else:
+            gate_activ = self.forget_gate(x_in)
+            if force is not None:
+                gate_activ = gate_activ + self.input_gate(force)
+
+        mu_base = torch.sigmoid(gate_activ) * FRICTION_SCALE
+        velocity_magnitude = torch.norm(v, dim=-1, keepdim=True)
+        velocity_magnitude = velocity_magnitude / (self.dim ** 0.5 + EPSILON_STRONG)
+        mu = mu_base * (1.0 + self.velocity_friction_scale * velocity_magnitude)
+
+        if getattr(self, 'return_friction_separately', False):
+            gamma_normalized = self._normalize_christoffel_structure(gamma)
+            return gamma_normalized, mu
+
+        gamma = gamma + mu * v
+        gamma = self._normalize_christoffel_structure(gamma)
+        return self.clamp_val * torch.tanh(gamma / self.clamp_val)

@@ -88,7 +88,7 @@ class GeodesicOptimalityTester:
             for t in range(seq_length):
                 force = all_forces[:, t]
                 for layer in self.model.layers:
-                    x, v = layer(x, v, force)
+                    x, v, _, _ = layer(x, v, force)
                 geodesic_trajectory.append(x.clone().cpu())
         
         # Compute straight-line trajectory (Euclidean)
@@ -279,7 +279,7 @@ class GeodesicOptimalityTester:
             for t in range(seq_length):
                 force = all_forces[:, t]
                 for layer in self.model.layers:
-                    x, v = layer(x, v, force)
+                    x, v, _, _ = layer(x, v, force)
                 velocities.append(v.clone())
         
         # Compute action: A = Σ ||v||²

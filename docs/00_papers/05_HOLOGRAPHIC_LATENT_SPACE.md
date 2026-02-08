@@ -36,7 +36,7 @@ Let the latent space be $\mathcal{X}$.
 Standard training minimizes $d(f(x), y)$.
 Holographic training minimizes $d(x, y)$ directly.
 
-This creates a powerful inductive bias: **The laws of physics inside the model ($F=ma$) must mimic the logical rules of the task.**
+This creates a powerful inductive bias: **The laws of physics inside the model ($F = ma$) must mimic the logical rules of the task.**
 
 ### 2.2 Case Study: The Parity Torus
 In the Parity task (XOR sum), the target is binary $\{0, 1\}$.
@@ -46,26 +46,30 @@ We map this to the Torus $S^1$:
 
 If we enforce Holographic Readout, the network cannot simply "classify" the input. It must move its latent particle from $0$ to $\pi$.
 *   Input "1" acts as a force $F$.
-*   The manifold curvature $\Gamma$ acts as the rail.
-*   The particle physically travels distance $\pi$.
+*   The manifold curvature $\Gamma^k_{ij}(x)$ acts as the rail through the Christoffel symbols of the Levi-Civita connection.
+*   The particle physically travels distance $\pi$ along the geodesic arc.
 
 ## 3. Discretization and Topology
 
 ### 3.1 Symplectic Step with Implicit Friction
-With base step $\Delta t$ and time gate $g(x)\in(0,1]$, we define $\Delta t_{\text{eff}}=g(x)\Delta t$ and $h=\tfrac{1}{2}\Delta t_{\text{eff}}$. The Leapfrog scheme (kick-drift-kick) with implicit friction is:
+With base step $\Delta t$ and time gate $g(x) \in (0,1]$, we define $\Delta t_{\text{eff}} = g(x) \Delta t$ and $h = \frac{1}{2} \Delta t_{\text{eff}}$. The Leapfrog scheme (kick-drift-kick) with implicit friction properly incorporates the tensorial form of the Christoffel connection:
+
 $$
-v_{n+\frac{1}{2}} = \frac{v_n + h\,[F_\theta(u_n) - \Gamma_\theta(x_n, v_n)]}{1 + h\,\mu_\theta(x_n,u_n)}
+v_{n+\frac{1}{2}}^k = \frac{v_n^k + h\left[F^k_\theta(u_n) - \Gamma^k_{ij}(x_n) v_n^i v_n^j\right]}{1 + h\,\mu_\theta(x_n, u_n)}
 $$
+
 $$
-x_{n+1} = \operatorname{wrap}\!\left(x_n + \Delta t_{\text{eff}}\, v_{n+\frac{1}{2}}\right)
+x_{n+1}^i = \operatorname{wrap}\!\left(x_n^i + \Delta t_{\text{eff}}\, v_{n+\frac{1}{2}}^i\right)
 $$
+
 $$
-v_{n+1} = \frac{v_{n+\frac{1}{2}} + h\,[F_\theta(u_n) - \Gamma_\theta(x_{n+1}, v_{n+\frac{1}{2}})]}{1 + h\,\mu_\theta(x_{n+1},u_n)}.
+v_{n+1}^k = \frac{v_{n+\frac{1}{2}}^k + h\left[F^k_\theta(u_n) - \Gamma^k_{ij}(x_{n+1}) v_{n+\frac{1}{2}}^i v_{n+\frac{1}{2}}^j\right]}{1 + h\,\mu_\theta(x_{n+1}, u_n)}.
 $$
-The wrapping applies topology (e.g., torus). For $\mu=0$ the map is symplectic (volume-preserving); $\mu>0$ introduces controlled dissipation for state "writing."
+
+The wrapping applies topology (e.g., torus). For $\mu = 0$ the map is symplectic (volume-preserving); $\mu > 0$ introduces controlled dissipation for state "writing." The Christoffel terms $\Gamma^k_{ij}(x)$ encode the geometric coupling and depend on the metric tensor through the standard formula $\Gamma^k_{ij} = \frac{1}{2} g^{kl}(\partial_i g_{jl} + \partial_j g_{il} - \partial_l g_{ij})$.
 
 ### 3.2 Periodic Topology
-The torus $T^n$ bounds coordinates and naturally represents cyclic computation. Gates consume periodic features $[\sin(x), \cos(x)]$ and the position update applies wrap modulo $2\pi$ for continuity.
+The torus $T^n$ bounds coordinates and naturally represents cyclic computation. Gates consume periodic features $[\sin(x), \cos(x)]$ and the position update applies wrap modulo $2\pi$ for continuity. On a flat torus with coordinates $(\theta^1, \theta^2, \ldots, \theta^n)$, the metric is constant $g_{ij} = \delta_{ij}$, making all Christoffel symbols identically zero and reducing the equations to simple harmonic motion.
 
 ## 4. Empirical Demonstration
 
@@ -85,7 +89,7 @@ This makes debugging trivial. If the model fails, we don't check weights; we che
 Holographic mode fixes readout as Identity and directly exposes $x_t$ for geometric supervision. Alternatively, implicit readout applies a lightweight MLP (with periodic expansion on torus) to map $x$ to target coordinates or discrete logits.
 
 ### 5.2 Multi-Head Manifolds
-The state is factored into $H$ heads; each head integrates its own geometry and gates, then mixes back into $(x, v)$. On torus, mixing uses periodic inputs to respect boundary continuity.
+The state is factored into $H$ heads; each head integrates its own geometry and gates, then mixes back into $(x, v)$. On torus, mixing uses periodic inputs to respect boundary continuity. Each head maintains its own metric tensor $g^{(h)}_{ij}(x)$ and corresponding Christoffel symbols $\Gamma^{(h)k}_{ij}(x)$.
 
 ### 5.3 Losses and Regularization
 In addition to the holographic loss:
@@ -107,6 +111,7 @@ On cyclic tasks (parity, phase), holographic mode produces stable trajectories w
 ## 8. Training Objective
 
 Let $x_t \in \mathcal{X}$ be the latent state and $y_t \in \mathcal{Y}$ the geometric target (e.g., angles in $T^n$ or bits mapped to phases). The primary objective in holographic mode directly minimizes geometric discrepancy:
+
 $$
 \mathcal{L}_{\text{task}} =
 \begin{cases}
@@ -114,14 +119,17 @@ $$
 \;\operatorname{dist}_{T^n}(x_t, y_t)^2, & \text{if } \mathcal{Y} \text{ is general toroidal}
 \end{cases}
 $$
+
 with $\operatorname{dist}_{T^n}$ defined as the minimum angular displacement under periodic conditions. The full objective combines physical regularizers:
+
 $$
 \mathcal{L} = \mathbb{E}_{t}\big[\mathcal{L}_{\text{task}}(x_t, y_t)\big]
  + \lambda_h\,\mathcal{H}(v_{0:T}) 
  + \lambda_g\,\mathcal{R}(\Gamma_{0:T}) 
  + \lambda_n\,\mathcal{N}(\text{symmetries})
 $$
-where $\mathcal{H}$ penalizes spurious energy creation (long-horizon stability), $\mathcal{R}$ smooths geodesic curvature, and $\mathcal{N}$ aligns geometric responses of isomeric heads. In implicit mode, the readout MLP produces coordinates/logits and the same loss family applies to its output.
+
+where $\mathcal{H}$ penalizes spurious energy creation (long-horizon stability), $\mathcal{R}$ smooths geodesic curvature by regularizing the Christoffel symbols $\Gamma^k_{ij}(x)$, and $\mathcal{N}$ aligns geometric responses of isomeric heads. In implicit mode, the readout MLP produces coordinates/logits and the same loss family applies to its output.
 
 
 
@@ -132,8 +140,8 @@ Holographic Readout transforms Deep Learning from "Curve Fitting" to "Reality Mo
 
 
 **References**  
-[1]  Tishby, N., & Zaslavsky, N. (2015). *Deep Learning and the Information Bottleneck Principle*. IEEE Information Theory Workshop.  
-[2]  Chen, T., et al. (2020). *A Simple Framework for Contrastive Learning of Visual Representations*. ICML.  
-[3]  Bengio, Y., et al. (2013). *Representation Learning: A Review and New Perspectives*. IEEE TPAMI.  
-[4]  Radford, A., et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision (CLIP)*. ICML.  
-[5]  Higgins, I., et al. (2017). *beta-VAE: Learning Basic Visual Concepts with a Constrained Variational Framework*. ICLR.
+[1] Tishby, N., & Zaslavsky, N. (2015). *Deep Learning and the Information Bottleneck Principle*. IEEE Information Theory Workshop.  
+[2] Chen, T., et al. (2020). *A Simple Framework for Contrastive Learning of Visual Representations*. ICML.  
+[3] Bengio, Y., et al. (2013). *Representation Learning: A Review and New Perspectives*. IEEE TPAMI.  
+[4] Radford, A., et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision (CLIP)*. ICML.  
+[5] Higgins, I., et al. (2017). *beta-VAE: Learning Basic Visual Concepts with a Constrained Variational Framework*. ICLR.

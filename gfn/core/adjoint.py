@@ -191,7 +191,7 @@ class AdjointManifold(nn.Module):
                 x = self.norms[i](x)
                 v = self.norms[i](v)
                 
-                x, v = layer(x, v, force)
+                x, v, _, _ = layer(x, v, force)
             
             out = self.readout_norm(x)
             logit = self.readout(out)

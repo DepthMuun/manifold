@@ -30,7 +30,8 @@ def check_gradients():
     criterion = nn.CrossEntropyLoss()
     
     print("Forward Pass...")
-    logits, _ = model(x)
+    output = model(x)
+    logits = output[0]
     loss = criterion(logits.view(-1, vocab), target.view(-1))
     
     print("Backward Pass...")
