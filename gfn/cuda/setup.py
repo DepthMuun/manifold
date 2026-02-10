@@ -15,6 +15,7 @@ cuda_sources = [
     # Integrator kernels - Symplectic
     'src/integrators/symplectic/leapfrog_fused.cu',
     'src/integrators/symplectic/leapfrog_backward.cu',
+    'src/integrators/toroidal/toroidal_christoffel_fused.cu',
     # Integrator kernels - Runge-Kutta
     'src/integrators/runge_kutta/heun_fused.cu',
     'src/integrators/runge_kutta/heun_backward.cu',
@@ -30,6 +31,7 @@ include_dirs = [
     os.path.join(cuda_src_dir, 'common'),
     os.path.join(cuda_src_dir, 'geometry'),
     os.path.join(cuda_src_dir, 'integrators'),
+    os.path.join(cuda_src_dir, 'integrators', 'toroidal'),
 ]
 
 is_windows = os.name == "nt"

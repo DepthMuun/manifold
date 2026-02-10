@@ -8,9 +8,8 @@ and view results in a formatted manner.
 Usage:
     python run_consistency_tests.py [--cpu-only] [--verbose] [--output FILE]
 
-Author: MiniMax Agent
 Date: 2026-02-07
-"""
+    """
 
 import subprocess
 import sys

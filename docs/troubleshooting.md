@@ -565,7 +565,7 @@ physics_config = DEFAULT_CONFIG.copy()
 1. Verify vocab_size matches dataset:
 
 ```python
-model = Manifold(vocab_size=50257)  # Standard GPT-2 vocabulary
+model = Manifold(vocab_size=50257)  # Standard transformer vocabulary
 # or
 model = Manifold(vocab_size=len(tokenizer))  # Custom vocabulary
 ```

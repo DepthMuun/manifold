@@ -1,5 +1,6 @@
 import sys
 import torch
+import pytest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -12,6 +13,7 @@ def summarize(name, diff, tol):
     print(f"{name}: max_diff={diff:.6g} tol={tol} => {status}")
     return status
 
+@pytest.mark.parametrize("topology", [0, 1])
 def test_christoffel(topology):
     B, D, Rnk = 16, 64, 16
     v_cpu = torch.randn(B, D, dtype=torch.float32)
@@ -30,8 +32,10 @@ def test_christoffel(topology):
     Vw_gpu = None
     gamma_gpu = ops.christoffel_fused(v_gpu, U_gpu, W_gpu, x_gpu, Vw_gpu, 0.0, 1.0, 1.0, topology, 2.0, 1.0)
     diff = (gamma_cpu - gamma_gpu.cpu()).abs().max().item()
-    return summarize(f"christoffel[topo={topology}]", diff, tol=3e-4)
+    status = summarize(f"christoffel[topo={topology}]", diff, tol=3e-4)
+    assert status == "PASS"
 
+@pytest.mark.parametrize("topology", [0, 1])
 def test_leapfrog(topology):
     B, D, Rnk = 8, 64, 16
     steps = 2
@@ -61,7 +65,7 @@ def test_leapfrog(topology):
     dv = (v_out_cpu - v_out_gpu.cpu()).abs().max().item()
     s1 = summarize(f"leapfrog[topo={topology}]-x", dx, tol=5e-4)
     s2 = summarize(f"leapfrog[topo={topology}]-v", dv, tol=5e-4)
-    return "PASS" if s1 == "PASS" and s2 == "PASS" else "FAIL"
+    assert s1 == "PASS" and s2 == "PASS"
 
 def test_head_mixing():
     H, Dh, B = 4, 8, 16
@@ -83,7 +87,7 @@ def test_head_mixing():
     dv = (v_out_cpu - v_out_gpu.cpu()).abs().max().item()
     s1 = summarize("head_mixing-x", dx, tol=1e-5)
     s2 = summarize("head_mixing-v", dv, tol=1e-5)
-    return "PASS" if s1 == "PASS" and s2 == "PASS" else "FAIL"
+    assert s1 == "PASS" and s2 == "PASS"
 
 def test_dynamic_gating():
     D = 64
@@ -104,7 +108,8 @@ def test_dynamic_gating():
     b2_gpu = b2_cpu.cuda()
     y_gpu = ops.dynamic_gating_fused(x_gpu, W1_gpu, b1_gpu, W2_gpu, b2_gpu)
     diff = (y_cpu - y_gpu.cpu()).abs().max().item()
-    return summarize("dynamic_gating", diff, tol=1e-5)
+    status = summarize("dynamic_gating", diff, tol=1e-5)
+    assert status == "PASS"
 
 def main():
     torch.manual_seed(123)

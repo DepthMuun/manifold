@@ -29,7 +29,7 @@ def test_gradient_flow():
         x_task = torch.randint(0, 2, (B, L), device=device)
         y_task = torch.cumsum(x_task, dim=1) % 2
         
-        logits, (x_final, v_final), _ = model(x_task)
+        logits, (x_final, v_final), *_ = model(x_task)
         
         # Binary target mapping
         target_bit = y_task.float() # [B, L]

@@ -29,7 +29,7 @@ class Manifold(nn.Module):
     """
     
     
-    def __init__(self, vocab_size, dim=256, depth=4, rank=32, heads=4, integrator_type='heun', base_dt=1.0, use_scan=False, physics_config=None, impulse_scale=None, holographic=False):
+    def __init__(self, vocab_size, dim=256, depth=4, rank=32, heads=4, integrator_type='heun', base_dt=None, use_scan=False, physics_config=None, impulse_scale=None, holographic=False):
         super().__init__()
         self.dim = dim
         self.depth = depth
@@ -37,6 +37,9 @@ class Manifold(nn.Module):
         self.integrator_type = integrator_type
         self.use_scan = use_scan
         self.physics_config = physics_config or {}
+        if base_dt is None:
+            from ..constants import DEFAULT_DT
+            base_dt = self.physics_config.get('stability', {}).get('base_dt', DEFAULT_DT)
         self.holographic = holographic or self.physics_config.get('holographic', False)
         
         emb_cfg = self.physics_config.get('embedding', {})

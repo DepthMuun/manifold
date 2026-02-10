@@ -43,7 +43,8 @@ def test_mechanics():
     # 2. Test Standard Backward
     print("\n[2] Testing Standard Forward/Backward...")
     model_std.zero_grad()
-    logits_std, _ = model_std(x)
+    output_std = model_std(x)
+    logits_std = output_std[0]
     loss_std = criterion(logits_std.view(-1, vocab_size), target.view(-1))
     loss_std.backward()
     grad_std = model_std.embedding.weight.grad.clone()
@@ -57,7 +58,8 @@ def test_mechanics():
         model_adj.zero_grad()
         # Enable gradient checkpointing/adjoint logic implicit in the module if implemented
         # Note: In our implementation, AdjointManifold uses torchdiffeq.odeint_adjoint
-        logits_adj, _ = model_adj(x)
+        output_adj = model_adj(x)
+        logits_adj = output_adj[0]
         loss_adj = criterion(logits_adj.view(-1, vocab_size), target.view(-1))
         loss_adj.backward()
         grad_adj = model_adj.embedding.weight.grad.clone()

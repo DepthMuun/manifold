@@ -24,9 +24,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Import GFN Models & Physics
 from gfn import Manifold
 from gfn.optimizers import RiemannianAdam
-from gfn.losses import GFNLoss  # AUDIT: Use new loss class with configurable modes
+from gfn.losses import geodesic_regularization, hamiltonian_loss, ToroidalDistanceLoss, GFNLoss
 from gfn.datasets import MathDataset
-from gfn.aggregation import MomentumAccumulation
 
 
 # Import Utils
@@ -36,19 +35,15 @@ console = Console()
 
 
 # =============================================================================
-# OPTIMAL PRODUCTION CONFIGURATION (2026-02-07)
+# PRODUCTION CONFIGURATION (2026-02-09)
 # =============================================================================
-# This configuration applies all fixes from the logical audit for PRODUCTION USE.
-# Key changes from baseline:
-# 1. retraction='normalize' (was 'euclidean') - enables Riemannian benefits
-# 2. velocity_friction_scale = 0.02 (was 0.05) - less damping
-# 3. FRICTION_SCALE = 0.02 (was 0.5) - proper symplectic conservation
-# 4. hamiltonian_mode = 'none' (was 'adaptive') - avoid physics conflicts
-# 5. geodesic_mode = 'structural' - preserve useful curvature
-# 6. LEAPFROG_SUBSTEPS = 3 (was 5) - cleaner gradient graph
-# 7. DEFAULT_DT = 0.05 (was 0.02) - better exploration
-# 8. SINGULARITY_GATE_SLOPE = 0.5 (was 1.0) - smoother transitions
-# 9. LAMBDA_G_DEFAULT = 0.00005 - preserve curvature
+# Effective configuration used by this benchmark.
+# Key points:
+# 1. Optimizer AdamW + OneCycleLR
+# 2. Toroidal topology with dynamic_time enabled
+# 3. base_dt=0.4 in stability
+# 4. singularities.strength=20.0, threshold=0.8
+# 5. lambda_g=0.001 and hamiltonian_mode='none'
 # =============================================================================
 
 OPTIMAL_PHYSICS_CONFIG = {
@@ -68,25 +63,16 @@ OPTIMAL_PHYSICS_CONFIG = {
         },
         'reactive_curvature': {
             'enabled': True,
-            'plasticity': 0.02  # Optimized for stability
+            'plasticity': 0.2
         },
         'singularities': {
             'enabled': True,
-            'strength': 1.0,   # Optimized from 1.5
-            'threshold': 0.5,
-            'gate_slope': 0.5  # Optimized from 1.0
-        },
-        'hysteresis': {
-            'enabled': False,     # Disabled for energy conservation
-            'strength': 1.0
+            'strength': 20.0,
+            'threshold': 0.8
         }
     },
-    'hierarchical_curvature': {
-        'enabled': True,
-        'ranks': [8, 16, 32]
-    },
     'fractal': {
-        'enabled': False,
+        'enabled': True,
         'threshold': 0.5,
         'alpha': 0.2
     },
@@ -94,17 +80,15 @@ OPTIMAL_PHYSICS_CONFIG = {
         'type': 'torus'
     },
     'stability': {
-        'base_dt': 0.05,           # Optimized from 0.02
-        'curvature_clamp': 2.5,    # Optimized from 3.0
-        'velocity_friction_scale': 0.02,  # Optimized from 0.05
+        'base_dt': 0.4
     }
 }
 
 OPTIMAL_LOSS_CONFIG = {
-    'lambda_h': 0.0,        # No Hamiltonian loss (prevents physics conflicts)
-    'lambda_g': 0.00005,    # Optimized for curvature preservation
-    'hamiltonian_mode': 'none',   # Disable to avoid conflicts with CE
-    'geodesic_mode': 'structural' # Preserve useful curvature
+    'lambda_h': 0.0,
+    'lambda_g': 0.001,
+    'hamiltonian_mode': 'none',
+    'geodesic_mode': 'magnitude'
 }
 
 
@@ -156,77 +140,53 @@ class ComplexMathTask:
         return x, y_class, y_angle
 
 
-def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_class, device, 
-                        aggregator=None, loss_fn=None):
+def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_class, device,
+                        loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize',
+                        collect_christ=False):
     """
-    PRODUCTION FIX: Updated to use production loss configuration.
-    
-    Key changes:
-    - Uses 'none' hamiltonian_mode to avoid physics conflicts
-    - Uses 'structural' geodesic_mode to preserve curvature
+    Training with toroidal loss and optional geodesic regularization.
+    hamiltonian_mode stays disabled by default.
     """
     optimizer.zero_grad()
     
-    # Collect physics data for loss computation
-    model.eval()  # Set to eval temporarily to get full output
-    output = model(inputs, collect_christ=True)
-    model.train()
+    output = model(inputs, collect_christ=collect_christ)
     
     if isinstance(output, tuple):
         x_pred = output[0]
     else:
         x_pred = output
-    
-    # Apply state accumulation aggregation if provided
-    if aggregator is not None:
-        x_agg, _, _ = aggregator(x_pred)
-        x_pred = x_pred.clone()
-        x_pred[:, -1] = x_agg
-    
-    # Extract physics components from model output
+
     christoffels = output[2] if len(output) > 2 else []
     v_seq = output[3] if len(output) > 3 else []
     x_seq = output[4] if len(output) > 4 else []
     all_forces = output[5] if len(output) > 5 else []
     
-    # Compute toroidal distance loss (primary task loss)
-    from gfn.geometry.boundaries import toroidal_dist_python
+    criterion = ToroidalDistanceLoss()
     y_float = targets.float()
     y_expanded = y_float.unsqueeze(-1).expand_as(x_pred)
+    loss_val = criterion(x_pred, y_expanded)
     
-    # Extract only last timestep
-    x_last = x_pred[:, -1]
-    y_last = y_expanded[:, -1]
+    loss_phy = 0.0
+    loss_ham = 0.0
     
-    dist = toroidal_dist_python(x_last, y_last)
-    loss_task = dist.pow(2).mean()
-    
-    # Use production loss function
-    if loss_fn is not None:
-        total_loss, loss_dict = loss_fn(
-            x_pred, 
-            targets_class.long(),
-            velocities=v_seq if v_seq else None,
-            christoffel_outputs=christoffels if christoffels else None,
-            states=x_seq if x_seq else None,
-            forces=all_forces if all_forces else None
+    if collect_christ and christoffels:
+        loss_phy = geodesic_regularization(
+            christoffels, 
+            velocities=v_seq, 
+            lambda_g=loss_config.get('lambda_g', 0.0001),
+            mode=loss_config.get('geodesic_mode', 'structural')
         )
-        
-        loss_val = loss_dict.get('ce', loss_task.item())
-        loss_phy = loss_dict.get('geodesic', 0.0)
-        loss_ham = loss_dict.get('hamiltonian', 0.0)
-    else:
-        # Fallback to simple task loss
-        loss_val = loss_task.item()
-        loss_phy = 0.0
-        loss_ham = 0.0
-        total_loss = loss_task
     
-    if torch.isnan(total_loss):
-        return total_loss, 0.0, {'ce': 1.0, 'geodesic': 0.0, 'hamiltonian': 0.0}
-        
+    if collect_christ and loss_config.get('hamiltonian_mode', 'none') != 'none' and v_seq:
+        loss_ham = hamiltonian_loss(
+            v_seq, 
+            energies=None,
+            mode=loss_config.get('hamiltonian_mode', 'none')
+        )
+    
+    total_loss = loss_val + loss_phy + loss_ham
     total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
     optimizer.step()
     if scheduler: scheduler.step()
     
@@ -235,10 +195,6 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
         TWO_PI = 2.0 * PI
         half_pi = PI * 0.5
 
-        # AUDIT FIX (2026-02-07): Evaluate accuracy on LAST token ONLY
-        # This is consistent with supervision which only supervises the last token
-        # The model is trained to predict parity from the cumulative sum, which
-        # is fully determined by the last token's position
         x_last = x_pred[:, -1]
         
         dist_pos = torch.min(torch.abs(x_last - half_pi) % TWO_PI, TWO_PI - (torch.abs(x_last - half_pi) % TWO_PI))
@@ -249,127 +205,63 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
         
         acc = (preds == targets_class).float().mean().item()
     
-    loss_info = {
-        'ce': loss_dict.get('ce', loss_val),
-        'geodesic': loss_dict.get('geodesic', loss_phy),
-        'hamiltonian': loss_dict.get('hamiltonian', loss_ham)
-    }
-    
-    return total_loss.item(), acc, loss_info
+    return total_loss.item(), acc
 
 
-def train_model(model_name, model, max_steps=1000, device='cuda', use_aggregation=False,
-                loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize'):
+def train_model(model_name, model, max_steps=1000, device='cuda', is_manifold=True,
+                loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize',
+                optimizer_type='adamw', collect_christ=False):
     """
-    Train the manifold model on the math complexity task.
-    
-    PRODUCTION FIX: Uses retraction='normalize' for Riemannian benefits.
-    
-    Args:
-        model_name: Name for logging
-        model: Manifold model to train
-        max_steps: Maximum training iterations
-        device: Computation device ('cuda' or 'cpu')
-        use_aggregation: Whether to use momentum accumulation aggregation
-        loss_config: Dictionary with loss configuration
-        retraction: Type of retraction ('euclidean', 'normalize', 'torus', 'cayley')
-    
-    Returns:
-        Dictionary with 'loss', 'acc', and 'loss_breakdown' training history
+    PRODUCTION FIX: Uses retraction='normalize' for RiemannianAdam.
     """
-    is_manifold = isinstance(model, Manifold)
-    
-    # PRODUCTION FIX: Create loss function with production config
-    loss_fn = GFNLoss(
-        lambda_h=loss_config.get('lambda_h', 0.0),
-        lambda_g=loss_config.get('lambda_g', 0.0001),
-        lambda_k=0.0,
-        lambda_c=0.0,
-        lambda_n=0.0,
-        hamiltonian_mode=loss_config.get('hamiltonian_mode', 'none'),
-        geodesic_mode=loss_config.get('geodesic_mode', 'structural')
-    ).to(device)
-    
-    # Freeze loss function (no gradients needed)
-    for param in loss_fn.parameters():
-        param.requires_grad = False
-    
     if is_manifold:
-        # PRODUCTION FIX: Use retraction='normalize' for Riemannian benefits
-        optimizer = RiemannianAdam([
-            {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
-            {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
-        ], retraction=retraction)  # PRODUCTION: was 'euclidean'
+        if optimizer_type == 'riemannian':
+            optimizer = RiemannianAdam([
+                {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
+                {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
+            ], retraction=retraction)
+        else:
+            optimizer = optim.AdamW([
+                {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
+                {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
+            ])
     else:
-        optimizer = RiemannianAdam(model.parameters(), lr=1e-3, weight_decay=1e-4, retraction=retraction)
-
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-3, total_steps=max_steps, pct_start=0.1)
-    # AUDIT FIX (2026-02-07): pct_start=0.1 ensures learning rate warmup completes early
-    # This is crucial for short training runs (150-500 steps) where pct_start=0.2
-    # would mean the max LR is never reached during training
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-3, total_steps=max_steps, pct_start=0.2)
     model.train()
     
-    history = {
-        "loss": [], 
-        "acc": [],
-        "loss_breakdown": {'ce': [], 'geodesic': [], 'hamiltonian': []}
-    }
-    
-    # Create task and aggregator once before training loop
-    task = ComplexMathTask(max_digits=8)
-    
-    # Create state accumulation aggregator if requested (once, before loop)
-    aggregator = None
-    if use_aggregation:
-        aggregator = MomentumAccumulation(
-            dim=model.dim,
-            alpha=0.15,
-            mode='avg',
-            gated=True
-        ).to(device)
-        print(f"\n[AGGREGATION] Enabled: State Accumulation (alpha=0.15, gated=True)\n")
+    history = {"loss": [], "acc": []}
     
     pbar = tqdm(range(max_steps), desc=f"Training {model_name}")
     
-    # AUDIT FIX (2026-02-07): Optimized convergence criteria
-    # - acc_threshold reduced to 0.95 for more achievable target
-    # - loss_threshold reduced to 0.15 for stricter optimization
-    # - min_steps increased to 200 to ensure minimum learning
-    # - patience increased to 30 for more robust convergence detection
-    acc_threshold = 0.95
-    loss_threshold = 0.15
-    min_steps = 200
-    patience = 30
+    acc_threshold = 0.98
+    loss_threshold = 0.2
+    min_steps = 100
+    patience = 20
     hits = 0
-    
     for i in pbar:
+        task = ComplexMathTask(max_digits=8)
         x, y_class, y_angle = task.generate_batch(128, device=device)
         
         if is_manifold:
-            loss, acc, loss_info = train_step_manifold(
-                model, optimizer, scheduler, x, y_angle, y_class, device, 
-                aggregator=aggregator, loss_fn=loss_fn
+            loss, acc = train_step_manifold(
+                model, optimizer, scheduler, x, y_angle, y_class, device,
+                loss_config=loss_config, retraction=retraction,
+                collect_christ=collect_christ
             )
             
-            history["loss"].append(loss)
-            history["acc"].append(acc)
-            history["loss_breakdown"]['ce'].append(loss_info['ce'])
-            history["loss_breakdown"]['geodesic'].append(loss_info['geodesic'])
-            history["loss_breakdown"]['hamiltonian'].append(loss_info['hamiltonian'])
-            
+        history["loss"].append(loss)
+        history["acc"].append(acc)
+        
         if i % 5 == 0:
-            pbar.set_postfix({
-                "loss": f"{loss:.4f}", 
-                "acc": f"{acc*100:.1f}%",
-                "hamiltonian": f"{loss_info['hamiltonian']:.4f}",
-                "geodesic": f"{loss_info['geodesic']:.4f}"
-            })
-
+            pbar.set_postfix({"loss": f"{loss:.4f}", "acc": f"{acc*100:.1f}%"})
+        
         if i >= min_steps and acc >= acc_threshold and loss <= loss_threshold:
             hits += 1
         else:
             hits = 0
-
+        
         if hits >= patience:
             print(f"\n[GFN] {model_name} converged at step {i}")
             break
@@ -378,7 +270,7 @@ def train_model(model_name, model, max_steps=1000, device='cuda', use_aggregatio
 
 
 def filter_valid_data(lengths, acc_data, mem_data):
-    """Filtrar datos válidos (no None) para graficar después de OOM"""
+    """Filter valid data (non-None) for plotting after OOM."""
     valid_lengths = []
     valid_acc = []
     valid_mem = []
@@ -480,17 +372,27 @@ def evaluate_scaling(model_name, model, lengths, device='cuda'):
     return results
 
 
-def print_header():
+def print_header(physics_config, loss_config, optimizer_label):
     console.print("\n" + "="*80, style="magenta")
     console.print("  [bold cyan]GFN MATH COMPLEXITY BENCHMARK[/] - [italic]PRODUCTION CONFIG (2026-02-07)[/]", justify="center")
     console.print("="*80, style="magenta")
     console.print(f"  [bold white]Hardware:[/] {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     console.print(f"  [bold white]Date:[/] {time.ctime()}")
-    console.print(f"  [bold green]PRODUCTION FIXES:[/]")
-    console.print(f"    - retraction='normalize' (was 'euclidean') for Riemannian benefits")
-    console.print(f"    - FRICTION_SCALE=0.05 (was 0.5) for symplectic conservation")
-    console.print(f"    - hamiltonian_mode='none' (prevents physics conflicts)")
-    console.print(f"    - LEAPFROG_SUBSTEPS=5 (shallower gradient graph)")
+    topology = physics_config.get('topology', {}).get('type', 'euclidean')
+    dynamic_time = physics_config.get('active_inference', {}).get('dynamic_time', {}).get('enabled', False)
+    stability_cfg = physics_config.get('stability', {})
+    singularities_cfg = physics_config.get('active_inference', {}).get('singularities', {})
+    base_dt = stability_cfg.get('base_dt', 'N/A')
+    sing_strength = singularities_cfg.get('strength', 'N/A')
+    sing_threshold = singularities_cfg.get('threshold', 'N/A')
+    ham_mode = loss_config.get('hamiltonian_mode', 'none')
+    lambda_g = loss_config.get('lambda_g', 'N/A')
+    console.print(f"  [bold green]EFFECTIVE CONFIGURATION:[/]")
+    console.print(f"    - Optimizer: {optimizer_label}")
+    console.print(f"    - Topology: {topology}, dynamic_time={'on' if dynamic_time else 'off'}")
+    console.print(f"    - base_dt={base_dt}")
+    console.print(f"    - singularity_strength={sing_strength}, threshold={sing_threshold}")
+    console.print(f"    - hamiltonian_mode={ham_mode}, lambda_g={lambda_g}")
     console.print("="*80 + "\n", style="magenta")
 
 
@@ -507,42 +409,41 @@ def run_production_benchmark():
     logger = ResultsLogger("math_complex_production", category="viz")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print_header()
+    optimizer_label = "AdamW + OneCycleLR"
+    print_header(PRODUCTION_PHYSICS_CONFIG, PRODUCTION_LOSS_CONFIG, optimizer_label)
 
-    dim = 128
+    dim = 256
     
-    # PRODUCTION: Use the production configuration
+    # Use the production configuration
     physics_config = PRODUCTION_PHYSICS_CONFIG
     
     manifold = Manifold(
         vocab_size=2, 
         dim=dim, 
-        depth=6, 
+        depth=8, 
         heads=4, 
         integrator_type='leapfrog', 
         physics_config=physics_config, 
         impulse_scale=80.0, 
-        holographic=False
+        holographic=True
     ).to(device)
         
-    # PRODUCTION: Training with corrected configuration
+    # Training
     h_m = train_model(
         "Manifold-GFN-PRODUCTION", 
         manifold, 
-        max_steps=500, 
+        max_steps=1000, 
         device=device,
         loss_config=PRODUCTION_LOSS_CONFIG,
-        retraction='normalize'  # PRODUCTION: Use normalize for Riemannian benefits
+        retraction='normalize',
+        optimizer_type='adamw'
     )
-    ckpt_path = logger.results_dir / "manifold_math_complex_production.pt"
-    torch.save(manifold.state_dict(), ckpt_path)
-    console.print(f"[bold green]Checkpoint guardado:[/] {ckpt_path}")
     
     # 3. Scaling
     lengths = [20, 100, 500, 1000, 2000]
     s_m = evaluate_scaling("Manifold-GFN-PRODUCTION", manifold, lengths, device)
     
-    # Filtrar datos válidos (manejar OOM)
+    # Filter valid data (handle OOM)
     lengths_m, acc_m, mem_m, oom_m = filter_valid_data(lengths, s_m["acc"], s_m["mem"])
     
     console.print(f"[bold cyan]Manifold-GFN-PRODUCTION:[/] {len(lengths_m)}/{len(lengths)} successful runs" + (f" (OOM at {oom_m})" if oom_m else ""))
@@ -609,16 +510,15 @@ def run_production_benchmark():
     summary_table.add_column("Manifold-GFN-PRODUCTION", justify="center")
     summary_table.add_column("Verdict", justify="right")
     
-    # Manejar OOM en el reporte final
+    # Handle OOM in the final report
     acc_m_final = s_m['acc'][-1] if s_m['acc'][-1] is not None else 0.0
     
     m_str = f"{acc_m_final*100:.1f}%" if s_m['acc'][-1] is not None else "[red]OOM[/]"
     target_l = lengths[-1]
     
     summary_table.add_row(f"Long Context ({target_l})", m_str, "", "[bold green]PRODUCTION[/]")
-    summary_table.add_row("Energy Conservation", "ENABLED (hamiltonian_mode='none')", "", "[bold green]PRODUCTION[/]")
-    summary_table.add_row("Friction Model", "Minimal (0.05)", "", "[bold green]PRODUCTION[/]")
-    summary_table.add_row("Riemannian Optimizer", "normalize retraction", "", "[bold green]PRODUCTION[/]")
+    summary_table.add_row("Optimizer", optimizer_label, "", "[bold green]PRODUCTION[/]")
+    summary_table.add_row("Physics Stability", "Current config", "", "[bold green]PRODUCTION[/]")
     
     console.print("\n", summary_table)
     console.print("\n[bold green][SUCCESS][/] Benchmark Complete. Dashboard saved to [cyan]results/viz/math_complex_production/gfn_math_complexity_production.png[/]\n")

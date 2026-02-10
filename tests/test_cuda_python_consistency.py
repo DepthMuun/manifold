@@ -13,7 +13,6 @@ Tests included:
 5. Edge case and stability tests
 6. Topology-specific tests
 
-Author: MiniMax Agent
 Date: 2026-02-07
 """
 

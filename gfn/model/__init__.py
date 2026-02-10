@@ -22,6 +22,17 @@ from .state import ManifoldState
 from .fusion import CUDAFusionManager
 
 __all__ = [
+    'Manifold',
+    'GFN',
+    'AdjointManifold',
     'ManifoldState',
     'CUDAFusionManager',
 ]
+
+def __getattr__(name):
+    if name in {'Manifold', 'GFN', 'AdjointManifold'}:
+        from ..core import Manifold, AdjointManifold
+        if name == 'AdjointManifold':
+            return AdjointManifold
+        return Manifold
+    raise AttributeError(name)

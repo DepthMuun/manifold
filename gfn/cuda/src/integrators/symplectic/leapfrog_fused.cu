@@ -29,6 +29,8 @@ __global__ void leapfrog_fused_kernel(
     int steps,
     int topology_id,
     scalar_t plasticity,
+    scalar_t sing_thresh,
+    scalar_t sing_strength,
     scalar_t R,
     scalar_t r,
     
@@ -109,7 +111,7 @@ __global__ void leapfrog_fused_kernel(
         // 2. Compute Christoffel force at current state
         christoffel_device(
             curr_v, U, W, curr_x, nullptr,
-            dim, rank, plasticity, 1.0f, 1.0f,
+            dim, rank, plasticity, sing_thresh, sing_strength,
             topology, R, r, gamma
         );
         
@@ -141,7 +143,7 @@ __global__ void leapfrog_fused_kernel(
         // 7. Compute Christoffel force at new state
         christoffel_device(
             curr_v, U, W, curr_x, nullptr,
-            dim, rank, plasticity, 1.0f, 1.0f,
+            dim, rank, plasticity, sing_thresh, sing_strength,
             topology, R, r, gamma
         );
         
@@ -224,6 +226,8 @@ std::vector<at::Tensor> leapfrog_fused(
     at::Tensor W_forget,    // [dim, feature_dim] or empty
     at::Tensor b_forget,    // [dim] or empty
     float plasticity,
+    float sing_thresh,
+    float sing_strength,
     float R,
     float r,
     
@@ -286,6 +290,8 @@ std::vector<at::Tensor> leapfrog_fused(
         steps,
         topology,
         plasticity,
+        sing_thresh,
+        sing_strength,
         R,
         r,
         

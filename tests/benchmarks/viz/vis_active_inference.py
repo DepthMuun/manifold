@@ -1,5 +1,5 @@
 """
-Active Inference Diagnostic Tool
+Reactive Dynamics Diagnostic Tool
 ================================
 Visualizes the 'Reactive Geometry' mechanics:
 1. Plasticity: Correlation between Kinetic Energy (Uncertainty) and Curvature.

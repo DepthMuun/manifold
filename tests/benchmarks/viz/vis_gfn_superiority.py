@@ -1,3 +1,8 @@
+import warnings
+import logging
+warnings.filterwarnings("ignore", message="The pynvml package is deprecated.*")
+warnings.filterwarnings("ignore", message="enable_nested_tensor is True.*")
+logging.getLogger("torchao.kernel.intmm").setLevel(logging.ERROR)
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -34,18 +39,15 @@ console = Console()
 
 
 # =============================================================================
-# OPTIMAL PRODUCTION CONFIGURATION (2026-02-07)
+# PRODUCTION CONFIGURATION (2026-02-09)
 # =============================================================================
-# Updated to fix convergence issues and enable proper CUDA alignment.
-# Key changes:
-# 1. retraction='normalize' - enables Riemannian optimizer benefits
-# 2. FRICTION_SCALE reduced to 0.02 - proper symplectic behavior
-# 3. base_dt=0.05 - better exploration
-# 4. singularity strength=1.0 - reduced amplification
-# 5. LEAPFROG_SUBSTEPS=3 - cleaner gradient graph
-# 6. hamiltonian_mode='none' - avoid physics conflicts
-# 7. SINGULARITY_GATE_SLOPE=0.5 - smoother transitions
-# 8. LAMBDA_G_DEFAULT=0.00005 - preserve curvature
+# Effective configuration used by this benchmark.
+# Key points:
+# 1. Optimizer AdamW + OneCycleLR
+# 2. Toroidal topology with dynamic_time enabled
+# 3. base_dt=0.4 in stability
+# 4. singularities.strength=20.0, threshold=0.8
+# 5. lambda_g=0.001 and hamiltonian_mode='none'
 # =============================================================================
 
 OPTIMAL_PHYSICS_CONFIG = {
@@ -65,25 +67,16 @@ OPTIMAL_PHYSICS_CONFIG = {
         },
         'reactive_curvature': {
             'enabled': True,
-            'plasticity': 0.02  # Optimized for stability
+            'plasticity': 0.2
         },
         'singularities': {
             'enabled': True,
-            'strength': 1.0,   # Optimized from 1.5
-            'threshold': 0.5,
-            'gate_slope': 0.5  # Optimized from 1.0
-        },
-        'hysteresis': {
-            'enabled': False,
-            'strength': 1.0
+            'strength': 20.0,
+            'threshold': 0.8
         }
     },
-    'hierarchical_curvature': {
-        'enabled': True,
-        'ranks': [8, 16, 32]
-    },
     'fractal': {
-        'enabled': False,  # Disabled for stability
+        'enabled': True,
         'threshold': 0.5,
         'alpha': 0.2
     },
@@ -91,17 +84,15 @@ OPTIMAL_PHYSICS_CONFIG = {
         'type': 'torus'
     },
     'stability': {
-        'base_dt': 0.05,           # Optimized from 0.02
-        'curvature_clamp': 2.5,    # Optimized from 3.0
-        'velocity_friction_scale': 0.02  # Optimized from 0.05
+        'base_dt': 0.4
     }
 }
 
 OPTIMAL_LOSS_CONFIG = {
-    'lambda_h': 0.0,        # No Hamiltonian loss
-    'lambda_g': 0.00005,    # Optimized for curvature preservation
+    'lambda_h': 0.0,
+    'lambda_g': 0.001,
     'hamiltonian_mode': 'none',
-    'geodesic_mode': 'structural'
+    'geodesic_mode': 'magnitude'
 }
 
 
@@ -133,21 +124,15 @@ class ParityTask:
 
 
 def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_class, device,
-                        loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize'):
+                        loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize',
+                        collect_christ=False):
     """
-    PRODUCTION FIX: Updated training step with production configuration.
-    
-    Key fixes:
-    - Uses retraction='normalize' for Riemannian benefits
-    - Uses hamiltonian_mode='none' to avoid physics conflicts
-    - Properly handles CUDA alignment with consistent operations
+    Training with toroidal loss and optional geodesic regularization.
+    hamiltonian_mode stays disabled by default.
     """
     optimizer.zero_grad()
     
-    # Collect physics data
-    model.eval()
-    output = model(inputs, collect_christ=True)
-    model.train()
+    output = model(inputs, collect_christ=collect_christ)
     
     if isinstance(output, tuple):
         x_pred = output[0]
@@ -156,21 +141,6 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
         
     y_float = targets.float()
     y_expanded = y_float.unsqueeze(-1).expand_as(x_pred)
-    
-    # Use production loss function
-    loss_fn = GFNLoss(
-        lambda_h=loss_config.get('lambda_h', 0.0),
-        lambda_g=loss_config.get('lambda_g', 0.0001),
-        lambda_k=0.0,
-        lambda_c=0.0,
-        lambda_n=0.0,
-        hamiltonian_mode=loss_config.get('hamiltonian_mode', 'none'),
-        geodesic_mode=loss_config.get('geodesic_mode', 'structural')
-    ).to(device)
-    
-    # Freeze loss function
-    for param in loss_fn.parameters():
-        param.requires_grad = False
     
     # Extract physics components
     christoffels = output[2] if len(output) > 2 else []
@@ -186,7 +156,7 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
     loss_phy = 0.0
     loss_ham = 0.0
     
-    if christoffels:
+    if collect_christ and christoffels:
         loss_phy = geodesic_regularization(
             christoffels, 
             velocities=v_seq, 
@@ -194,7 +164,7 @@ def train_step_manifold(model, optimizer, scheduler, inputs, targets, targets_cl
             mode=loss_config.get('geodesic_mode', 'structural')
         )
     
-    if loss_config.get('hamiltonian_mode', 'none') != 'none' and v_seq:
+    if collect_christ and loss_config.get('hamiltonian_mode', 'none') != 'none' and v_seq:
         def first_head_metric(x):
             return model.layers[0].christoffels[0].get_metric(x) if hasattr(model.layers[0].christoffels[0], 'get_metric') else torch.ones_like(x)
         loss_ham = hamiltonian_loss(
@@ -248,38 +218,37 @@ def train_step_gpt(model, optimizer, scheduler, inputs, targets, device):
 
 
 def train_model(model_name, model, max_steps=1000, device='cuda', is_manifold=True,
-                loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize'):
+                loss_config=PRODUCTION_LOSS_CONFIG, retraction='normalize',
+                optimizer_type='adamw', collect_christ=False):
     """
     PRODUCTION FIX: Uses retraction='normalize' for RiemannianAdam.
     """
     if is_manifold:
-        # PRODUCTION: Use retraction='normalize' for Riemannian benefits
-        optimizer = RiemannianAdam([
-            {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
-            {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
-        ], retraction=retraction)  # PRODUCTION: was 'euclidean'
+        if optimizer_type == 'riemannian':
+            optimizer = RiemannianAdam([
+                {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
+                {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
+            ], retraction=retraction)
+        else:
+            optimizer = optim.AdamW([
+                {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-3, 'weight_decay': 1e-4},
+                {'params': [p for n, p in model.named_parameters() if any(x in n for x in ['x0', 'v0', 'impulse_scale', 'gate'])], 'lr': 1e-2, 'weight_decay': 0}
+            ])
     else:
-        optimizer = RiemannianAdam(model.parameters(), lr=1e-3, weight_decay=1e-4, retraction=retraction)
+        optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-3, total_steps=max_steps, pct_start=0.1)
-    # AUDIT FIX (2026-02-07): pct_start=0.1 ensures learning rate warmup completes early
-    # This is crucial for short training runs where pct_start=0.2 would prevent
-    # the model from reaching the maximum learning rate
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-3, total_steps=max_steps, pct_start=0.2)
     model.train()
     
     history = {"loss": [], "acc": []}
     
     pbar = tqdm(range(max_steps), desc=f"Training {model_name}")
     
-    # AUDIT FIX (2026-02-07): Optimized convergence criteria
-    # - acc_threshold reduced to 0.95 for more achievable target
-    # - loss_threshold reduced to 0.15 for stricter optimization
-    # - min_steps increased to 200 to ensure minimum learning
-    # - patience increased to 30 for more robust convergence detection
-    acc_threshold = 0.95
-    loss_threshold = 0.15
-    min_steps = 200
-    patience = 30
+    # Effective convergence criteria in this script
+    acc_threshold = 0.98
+    loss_threshold = 0.2
+    min_steps = 100
+    patience = 20
     hits = 0
     for i in pbar:
         L = 20
@@ -289,7 +258,8 @@ def train_model(model_name, model, max_steps=1000, device='cuda', is_manifold=Tr
         if is_manifold:
             loss, acc = train_step_manifold(
                 model, optimizer, scheduler, x, y_angle, y_class, device,
-                loss_config=loss_config, retraction=retraction
+                loss_config=loss_config, retraction=retraction,
+                collect_christ=collect_christ
             )
         else:
             loss, acc = train_step_gpt(model, optimizer, scheduler, x, y_class, device)
@@ -415,39 +385,43 @@ def evaluate_scaling(model_name, model, lengths, device='cuda'):
     return results
 
 
-def print_header():
+def print_header(physics_config, loss_config, optimizer_label):
     console.print("\n" + "="*80, style="magenta")
     console.print("  [bold cyan]GFN SUPERIORITY BENCHMARK[/] - [italic]PRODUCTION CONFIG (2026-02-07)[/]", justify="center")
     console.print("="*80, style="magenta")
     console.print(f"  [bold white]Hardware:[/] {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     console.print(f"  [bold white]Date:[/] {time.ctime()}")
-    console.print(f"  [bold green]PRODUCTION FIXES:[/]")
-    console.print(f"    - retraction='normalize' (was 'euclidean') for Riemannian benefits")
-    console.print(f"    - FRICTION_SCALE=0.05 for proper symplectic conservation")
-    console.print(f"    - singularity_strength=1.5 (was 20.0)")
-    console.print(f"    - LEAPFROG_SUBSTEPS=5 (shallower gradient graph)")
-    console.print(f"    - hamiltonian_mode='none' (prevents physics conflicts)")
+    topology = physics_config.get('topology', {}).get('type', 'euclidean')
+    dynamic_time = physics_config.get('active_inference', {}).get('dynamic_time', {}).get('enabled', False)
+    stability_cfg = physics_config.get('stability', {})
+    singularities_cfg = physics_config.get('active_inference', {}).get('singularities', {})
+    base_dt = stability_cfg.get('base_dt', 'N/A')
+    sing_strength = singularities_cfg.get('strength', 'N/A')
+    sing_threshold = singularities_cfg.get('threshold', 'N/A')
+    ham_mode = loss_config.get('hamiltonian_mode', 'none')
+    lambda_g = loss_config.get('lambda_g', 'N/A')
+    console.print(f"  [bold green]EFFECTIVE CONFIGURATION:[/]")
+    console.print(f"    - Optimizer: {optimizer_label}")
+    console.print(f"    - Topology: {topology}, dynamic_time={'on' if dynamic_time else 'off'}")
+    console.print(f"    - base_dt={base_dt}")
+    console.print(f"    - singularity_strength={sing_strength}, threshold={sing_threshold}")
+    console.print(f"    - hamiltonian_mode={ham_mode}, lambda_g={lambda_g}")
     console.print("="*80 + "\n", style="magenta")
 
 
 def run_production_superiority_benchmark():
     """
-    Run the superiority benchmark with PRODUCTION CONFIGURATION.
-    
-    This configuration ensures:
-    1. RiemannianAdam provides actual benefits via 'normalize' retraction
-    2. Physics losses don't conflict with cross-entropy optimization
-    3. Integration is numerically stable with proper CUDA alignment
-    4. Tests converge properly
+    Run the superiority benchmark with the current production configuration.
     """
     logger = ResultsLogger("superiority_production", category="viz")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print_header()
+    optimizer_label = "AdamW + OneCycleLR"
+    print_header(PRODUCTION_PHYSICS_CONFIG, PRODUCTION_LOSS_CONFIG, optimizer_label)
 
     dim = 128
     
-    # PRODUCTION: Use production physics configuration
+    # Use production physics configuration
     physics_config = PRODUCTION_PHYSICS_CONFIG
     
     # Create models with production config
@@ -464,14 +438,15 @@ def run_production_superiority_benchmark():
     
     gpt = MicroGPT(vocab_size=2, dim=dim, depth=6, heads=4, max_len=100000).to(device)
         
-    # 2. Training - PRODUCTION: Use normalize retraction
+    # 2. Training
     h_m = train_model(
         "Manifold-GFN-PRODUCTION", 
         manifold, 
-        max_steps=150, 
+        max_steps=1000, 
         device=device, 
         is_manifold=True,
-        retraction='normalize'  # PRODUCTION: Use normalize for Riemannian benefits
+        optimizer_type='adamw',
+        retraction='normalize'
     )
     
     h_g = train_model("Transformer-GPT", gpt, max_steps=1000, device=device, is_manifold=False)
@@ -481,7 +456,7 @@ def run_production_superiority_benchmark():
     s_m = evaluate_scaling("Manifold-GFN-PRODUCTION", manifold, lengths, device)
     s_g = evaluate_scaling("Transformer-GPT", gpt, lengths, device)
     
-    # Filtrar datos válidos (manejar OOM)
+    # Filter valid data (handle OOM)
     lengths_m, acc_m, mem_m, oom_m = filter_valid_data(lengths, s_m["acc"], s_m["mem"])
     lengths_g, acc_g, mem_g, oom_g = filter_valid_data(lengths, s_g["acc"], s_g["mem"])
     
@@ -519,7 +494,7 @@ def run_production_superiority_benchmark():
     ax.set_title("Learning Dynamics (Production)", fontweight='bold', fontsize=18, color='white')
     ax.legend(facecolor='#1e1e1e', edgecolor=cols[0], labelcolor='white')
 
-    # Plot C: OOD Generalization (con datos filtrados)
+    # Plot C: OOD Generalization (filtered data)
     ax = axes[1, 0]
     if len(lengths_m) > 0:
         ax.plot(lengths_m, acc_m, 'o-', color=cols[0], label='Manifold GFN (Production)', linewidth=5, markersize=12, markerfacecolor='white')
@@ -530,7 +505,7 @@ def run_production_superiority_benchmark():
     ax.set_ylabel("Accuracy")
     ax.legend(facecolor='#1e1e1e', edgecolor=cols[0], labelcolor='white')
 
-    # Plot D: VRAM (con datos filtrados)
+    # Plot D: VRAM (filtered data)
     ax = axes[1, 1]
     if len(lengths_m) > 0:
         ax.plot(lengths_m, mem_m, 'o-', color=cols[0], label='Manifold (Production)', linewidth=5, markersize=12, markerfacecolor='white')
@@ -552,7 +527,7 @@ def run_production_superiority_benchmark():
     summary_table.add_column("Transformer", justify="center")
     summary_table.add_column("Verdict", justify="right")
     
-    # Manejar OOM en el reporte final
+    # Handle OOM in the final report
     acc_m_final = s_m['acc'][-1] if s_m['acc'][-1] is not None else 0.0
     acc_g_final = s_g['acc'][-1] if s_g['acc'][-1] is not None else 0.0
     
@@ -562,8 +537,8 @@ def run_production_superiority_benchmark():
     
     summary_table.add_row(f"Long Context ({target_l})", m_str, g_str, "[bold green]GFN[/]" if acc_m_final > acc_g_final else "Transformer")
     summary_table.add_row("Memory Complexity", "O(1)", "O(N²)", "[bold green]GFN[/]")
-    summary_table.add_row("Riemannian Optimizer", "normalize retraction", "N/A", "[bold green]GFN[/]")
-    summary_table.add_row("Physics Stability", "Production Config", "N/A", "[bold green]PRODUCTION[/]")
+    summary_table.add_row("Optimizer", optimizer_label, optimizer_label, "[bold green]GFN[/]")
+    summary_table.add_row("Physics Stability", "Current config", "N/A", "[bold green]PRODUCTION[/]")
     
     console.print("\n", summary_table)
     console.print("\n[bold green][SUCCESS][/] Benchmark Complete. Dashboard saved to [cyan]results/viz/superiority_production/gfn_superiority_production.png[/]\n")

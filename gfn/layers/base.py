@@ -239,7 +239,9 @@ class MLayer(nn.Module):
         # AUDIT FIX: Clamp dt_scale to reasonable range
         # Prevents extreme timesteps that cause numerical instability
         # Range [0.1, 2.0] provides stable integration across most scenarios
-        dt_min, dt_max = 0.1, 2.0
+        stability_cfg = self.physics_config.get('stability', {})
+        dt_min = stability_cfg.get('dt_min', self.base_dt * 0.1)
+        dt_max = stability_cfg.get('dt_max', self.base_dt * 4.0)
         dt_base = torch.clamp(dt_base, dt_min, dt_max)
         
         # Only apply dynamic gating if enabled

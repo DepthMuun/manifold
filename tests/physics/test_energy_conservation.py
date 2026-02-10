@@ -72,7 +72,7 @@ class EnergyConservationTester:
                 
                 # Evolve through layers
                 for layer in self.model.layers:
-                    x, v = layer(x, v, force)
+                    x, v, _, _ = layer(x, v, force)
                 
                 # Compute kinetic energy: E = ||v||²
                 energy = (v ** 2).sum().item()
@@ -189,7 +189,7 @@ class EnergyConservationTester:
                 for t in range(seq_length):
                     force = all_forces[:, t]
                     for layer in model.layers:
-                        x, v = layer(x, v, force)
+                        x, v, _, _ = layer(x, v, force)
                     energy = (v ** 2).sum().item()
                     energies.append(energy)
             
@@ -269,7 +269,7 @@ class EnergyConservationTester:
                     for t in range(input_seq.size(1)):
                         force = all_forces[:, t]
                         for layer in self.model.layers:
-                            x, v = layer(x, v, force)
+                            x, v, _, _ = layer(x, v, force)
                         
                         energy = (v ** 2).sum().item()
                         

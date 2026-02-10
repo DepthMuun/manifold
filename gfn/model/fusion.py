@@ -344,6 +344,8 @@ class CUDAFusionManager:
             # Python binding: gfn/cuda/ops.py::launch_toroidal_leapfrog_fused()
             
             if params.get('is_torus', False):
+                if self.model.training:
+                    return None
                 try:
                     from ..cuda.ops import launch_toroidal_leapfrog_fused
                     
@@ -355,7 +357,8 @@ class CUDAFusionManager:
                         dt=params['base_dt'],
                         batch=x.shape[0],
                         seq_len=forces.shape[1],
-                        dim=x.shape[1]
+                        dim=x.shape[1],
+                        hysteresis_state=hysteresis_state
                     )
                     
                     if result is not None:

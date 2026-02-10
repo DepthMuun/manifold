@@ -24,10 +24,14 @@
  *   - implementation_plan.md: Component 2
  */
 
+#include <ATen/ATen.h>
+#include <c10/util/Exception.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include "../../common/types.cuh"
 #include "../../common/device_utils.cuh"
 #include "../../common/math_utils.cuh"
-#include "../geometry/christoffel_impl.cuh"
+#include "../../geometry/christoffel_impl.cuh"
 
 namespace gfn {
 namespace cuda {
@@ -289,3 +293,54 @@ void launch_toroidal_leapfrog_fused(
 
 } // namespace cuda
 } // namespace gfn
+
+// ============================================================================
+// PyTorch C++ Interface
+// ============================================================================
+
+using namespace gfn::cuda;
+
+std::vector<at::Tensor> toroidal_leapfrog_fused(
+    at::Tensor x,           // [batch, dim]
+    at::Tensor v,           // [batch, dim]
+    at::Tensor f,           // [batch, seq_len, dim]
+    float R,
+    float r,
+    float dt,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t dim
+) {
+    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+    TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
+    TORCH_CHECK(f.is_cuda(), "f must be a CUDA tensor");
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [batch, dim]");
+    TORCH_CHECK(v.dim() == 2, "v must be 2D [batch, dim]");
+    TORCH_CHECK(f.dim() == 3, "f must be 3D [batch, seq_len, dim]");
+    TORCH_CHECK(x.size(0) == batch && x.size(1) == dim, "x shape mismatch");
+    TORCH_CHECK(v.size(0) == batch && v.size(1) == dim, "v shape mismatch");
+    TORCH_CHECK(f.size(0) == batch && f.size(1) == seq_len && f.size(2) == dim, "f shape mismatch");
+
+    auto options = x.options();
+    auto x_out = at::empty({batch, seq_len, dim}, options);
+    auto v_out = at::empty({batch, seq_len, dim}, options);
+
+    launch_toroidal_leapfrog_fused(
+        x.data_ptr<scalar_t>(),
+        v.data_ptr<scalar_t>(),
+        f.data_ptr<scalar_t>(),
+        static_cast<scalar_t>(R),
+        static_cast<scalar_t>(r),
+        static_cast<scalar_t>(dt),
+        static_cast<int>(batch),
+        static_cast<int>(seq_len),
+        static_cast<int>(dim),
+        x_out.data_ptr<scalar_t>(),
+        v_out.data_ptr<scalar_t>()
+    );
+
+    cudaError_t err = cudaGetLastError();
+    TORCH_CHECK(err == cudaSuccess, "CUDA kernel error: ", cudaGetErrorString(err));
+
+    return {x_out, v_out};
+}

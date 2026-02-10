@@ -1,12 +1,9 @@
 """
-GFN CUDA Kernels - Módulo de Operaciones Base
+GFN CUDA Kernels - Base Operations Module
 ==============================================
 
-Este módulo proporciona las operaciones fundamentales de CUDA para el proyecto GFN.
-Diseñado de forma modular para facilitar la extensión y el testing.
-
-Autor: MiniMax Agent
-Fecha: 2026-02-07
+This module provides the fundamental CUDA operations for the GFN project.
+Designed in a modular way to facilitate extension and testing.
 """
 
 import torch
@@ -16,17 +13,17 @@ from typing import Optional, Tuple, Dict, Any
 
 
 # ============================================================================
-# GESTOR DE DISPOSITIVOS Y CONSTANTES
+# DEVICE MANAGER AND CONSTANTS
 # ============================================================================
 
 class CudaDeviceManager:
     """
-    Gestiona la disponibilidad y estado de los dispositivos CUDA.
+    Manages the availability and state of CUDA devices.
     
-    Proporciona una interfaz unificada para:
-    - Detección de dispositivos
-    - Gestión de memoria
-    - Sincronización
+    Provides a unified interface for:
+    - Device detection
+    - Memory management
+    - Synchronization
     """
     
     _instance = None
@@ -47,7 +44,7 @@ class CudaDeviceManager:
             CudaDeviceManager._initialized = True
     
     def _init_device(self):
-        """Inicializa la información del dispositivo."""
+        """Initializes device information."""
         self._cuda_available = torch.cuda.is_available()
         
         if self._cuda_available:
@@ -73,18 +70,18 @@ class CudaDeviceManager:
         return self._compute_capability
     
     def get_device(self, index: int = 0) -> torch.device:
-        """Obtiene el dispositivo en el índice especificado."""
+        """Gets the device at the specified index."""
         if self._cuda_available and index < self._device_count:
             return torch.device(f'cuda:{index}')
         return torch.device('cpu')
     
     def empty_cache(self):
-        """Libera memoria CUDA no utilizada."""
+        """Releases unused CUDA memory."""
         if self._cuda_available:
             torch.cuda.empty_cache()
     
     def synchronize(self, device: Optional[torch.device] = None):
-        """Sincroniza el dispositivo especificado."""
+        """Synchronizes the specified device."""
         if self._cuda_available:
             if device is None:
                 device = self.get_device()
@@ -92,7 +89,7 @@ class CudaDeviceManager:
                 torch.cuda.synchronize(device)
     
     def memory_info(self) -> Dict[str, Any]:
-        """Obtiene información de memoria del dispositivo."""
+        """Gets device memory information."""
         if not self._cuda_available:
             return {"available": 0, "total": 0, "used": 0}
         
@@ -109,46 +106,46 @@ device_manager = CudaDeviceManager()
 
 
 # ============================================================================
-# CONSTANTES CENTRALIZADAS
+# CENTRALIZED CONSTANTS
 # ============================================================================
 
 class CudaConstants:
     """
-    Constantes específicas para operaciones CUDA.
+    Specific constants for CUDA operations.
 
-    Estas constantes están sincronizadas con las constantes Python para
-    garantizar consistencia entre las implementaciones.
+    These constants are synchronized with Python constants to
+    ensure consistency between implementations.
 
     AUDIT FIX (2026-02-07): Updated to match optimized Python constants.
     """
 
-    # Física - OPTIMIZED for proper symplectic behavior
+    # Physics - OPTIMIZED for proper symplectic behavior
     FRICTION_SCALE = 0.02
     VELOCITY_FRICTION_SCALE = 0.02
     DEFAULT_FRICTION = 0.002
 
-    # Estabilidad numérica - OPTIMIZED for better gradient flow
+    # Numerical stability - OPTIMIZED for better gradient flow
     EPSILON_STANDARD = 1e-7
     EPSILON_STRONG = 1e-7
     EPSILON_SMOOTH = 1e-7
 
-    # Geometría - OPTIMIZED for stability
-    CURVATURE_CLAMP = 2.5
+    # Geometry - OPTIMIZED for stability
+    CURVATURE_CLAMP = 3.0
     SINGULARITY_GATE_SLOPE = 0.5
 
-    # Integración - OPTIMIZED for exploration
+    # Integration - OPTIMIZED for exploration
     DEFAULT_DT = 0.05
     LEAPFROG_SUBSTEPS = 3
 
-    # Velocidad
+    # Velocity
     VELOCITY_SATURATION = 100.0
 
-    # Topología
+    # Topology
     TOROIDAL_PERIOD = 6.283185307179586  # 2 * π
     
     @classmethod
     def to_dict(cls) -> Dict[str, float]:
-        """Retorna las constantes como diccionario."""
+        """Returns constants as a dictionary."""
         return {
             'FRICTION_SCALE': cls.FRICTION_SCALE,
             'VELOCITY_FRICTION_SCALE': cls.VELOCITY_FRICTION_SCALE,
@@ -166,17 +163,17 @@ class CudaConstants:
 
 
 # ============================================================================
-# REGISTRO DE OPERACIONES
+# OPERATION REGISTRY
 # ============================================================================
 
 class OperationRegistry:
     """
-    Registro de operaciones CUDA disponibles.
+    Registry of available CUDA operations.
     
-    Permite:
-    - Registrar nuevas operaciones
-    - Verificar disponibilidad
-    - Obtener información de operaciones
+    Allows:
+    - Registering new operations
+    - Verifying availability
+    - Getting operation information
     """
     
     def __init__(self):
@@ -184,7 +181,7 @@ class OperationRegistry:
         self._register_standard_operations()
     
     def _register_standard_operations(self):
-        """Registra las operaciones estándar."""
+        """Registers standard operations."""
         standard_ops = [
             'christoffel_fused',
             'lowrank_christoffel_fused',
@@ -207,7 +204,7 @@ class OperationRegistry:
             }
     
     def register(self, name: str, cuda_impl: bool, python_fallback: bool, description: str = ''):
-        """Registra una nueva operación."""
+        """Registers a new operation."""
         self._operations[name] = {
             'available': cuda_impl or python_fallback,
             'cuda_available': cuda_impl,
@@ -216,23 +213,23 @@ class OperationRegistry:
         }
     
     def is_available(self, name: str) -> bool:
-        """Verifica si una operación está disponible."""
+        """Checks if an operation is available."""
         return self._operations.get(name, {}).get('available', False)
     
     def has_cuda(self, name: str) -> bool:
-        """Verifica si una operación tiene implementación CUDA."""
+        """Checks if an operation has a CUDA implementation."""
         return self._operations.get(name, {}).get('cuda_available', False)
     
     def get_info(self, name: str) -> Dict[str, Any]:
-        """Obtiene información de una operación."""
+        """Gets information about an operation."""
         return self._operations.get(name, {})
     
     def list_available(self) -> Dict[str, Dict[str, Any]]:
-        """Lista todas las operaciones disponibles."""
+        """Lists all available operations."""
         return self._operations
     
     def summary(self) -> Dict[str, int]:
-        """Retorna un resumen de disponibilidad."""
+        """Returns an availability summary."""
         cuda_count = sum(1 for op in self._operations.values() if op['cuda_available'])
         fallback_count = sum(1 for op in self._operations.values() if op['python_fallback'])
         return {
@@ -243,36 +240,36 @@ class OperationRegistry:
         }
 
 
-# Instancia global del registro
+# Global registry instance
 operation_registry = OperationRegistry()
 
 
 # ============================================================================
-# INTERFAZ PÚBLICA
+# PUBLIC INTERFACE
 # ============================================================================
 
 def get_device_manager() -> CudaDeviceManager:
-    """Obtiene el gestor de dispositivos."""
+    """Gets the device manager."""
     return device_manager
 
 
 def get_constants() -> CudaConstants:
-    """Obtiene las constantes CUDA."""
+    """Gets the CUDA constants."""
     return CudaConstants
 
 
 def get_operation_registry() -> OperationRegistry:
-    """Obtiene el registro de operaciones."""
+    """Gets the operation registry."""
     return operation_registry
 
 
 def check_cuda_availability() -> bool:
-    """Verifica si CUDA está disponible."""
+    """Checks if CUDA is available."""
     return device_manager.is_available
 
 
 def get_device_info() -> Dict[str, Any]:
-    """Obtiene información completa del dispositivo."""
+    """Gets complete device information."""
     return {
         'available': device_manager.is_available,
         'name': device_manager.device_name,

@@ -1,23 +1,23 @@
 """
-GFN CUDA Operations - Módulo de Operaciones Fusión
-===================================================
+GFN CUDA Operations - Fused Operations Module
+==============================================
 
-Este módulo proporciona operaciones CUDA fusionadas para el proyecto GFN.
-Diseñado de forma modular para facilitar la extensión y el testing.
+This module provides fused CUDA operations for the GFN project.
+Designed in a modular way to facilitate extension and testing.
 
-Operaciones disponibles:
-- christoffel_fused: Símbolos de Christoffel con descomposición low-rank
-- leapfrog_fused: Integrador simpléctico leapfrog
-- heun_fused: Integrador Heun (RK2)
-- euler_fused: Integrador Euler
-- rk4_fused: Integrador Runge-Kutta 4
-- verlet_fused: Integrador Verlet
-- head_mixing_fused: Mezcla de cabezas de atención
-- dynamic_gating_fused: Compuerta dinámica
-- recurrent_manifold_fused: Fusión de múltiple capas de manifold
+Available operations:
+- christoffel_fused: Christoffel symbols with low-rank decomposition
+- leapfrog_fused: Symplectic leapfrog integrator
+- heun_fused: Heun integrator (RK2)
+- euler_fused: Euler integrator
+- rk4_fused: Runge-Kutta 4 integrator
+- verlet_fused: Verlet integrator
+- head_mixing_fused: Attention head mixing
+- dynamic_gating_fused: Dynamic gating
+- recurrent_manifold_fused: Multi-layer manifold fusion
 
-Autor: MiniMax Agent
-Fecha: 2026-02-07
+
+Date: 2026-02-07
 """
 
 import torch
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from abc import ABC, abstractmethod
 
-# Importar módulo base
+# Import base module
 from .core import (
     device_manager,
     CudaConstants,
@@ -40,17 +40,17 @@ from .core import (
 
 
 # ============================================================================
-# CARGADOR DE MÓDULO CUDA
+# CUDA MODULE LOADER
 # ============================================================================
 
 class CudaModuleLoader:
     """
-    Cargador modular para módulos CUDA compiled.
+    Modular loader for compiled CUDA modules.
     
-    Maneja:
-    - Detección de módulos compilados
-    - Carga dinámica
-    - Fallbacks automáticos
+    Handles:
+    - Compiled module detection
+    - Dynamic loading
+    - Automatic fallbacks
     """
     
     def __init__(self):
@@ -58,7 +58,7 @@ class CudaModuleLoader:
         self._load_paths = self._get_load_paths()
     
     def _get_load_paths(self) -> List[Path]:
-        """Obtiene las rutas de búsqueda para módulos CUDA."""
+        """Gets search paths for CUDA modules."""
         cuda_dir = Path(__file__).resolve().parent
         project_root = cuda_dir.parent.parent
         
@@ -73,7 +73,7 @@ class CudaModuleLoader:
         return paths
     
     def _get_extension_patterns(self) -> List[str]:
-        """Obtiene los patrones de extensión según la plataforma."""
+        """Gets extension patterns based on platform."""
         if sys.platform.startswith("win"):
             return ["*.pyd"]
         elif sys.platform.startswith("darwin"):
@@ -82,7 +82,7 @@ class CudaModuleLoader:
             return ["*.so"]
     
     def find_module(self, name: str) -> Optional[Path]:
-        """Busca un módulo compilado por nombre."""
+        """Searches for a compiled module by name."""
         patterns = self._get_extension_patterns()
         
         for base_path in self._load_paths:
@@ -97,7 +97,7 @@ class CudaModuleLoader:
         return None
     
     def load(self, name: str) -> Optional[Any]:
-        """Carga un módulo por nombre."""
+        """Loads a module by name."""
         if name in self._loaded_modules:
             return self._loaded_modules[name]
         
@@ -119,57 +119,58 @@ class CudaModuleLoader:
             return module
             
         except Exception as e:
-            print(f"[CUDA] Error cargando módulo {name}: {e}")
+            print(f"[CUDA] Error loading module {name}: {e}")
             return None
     
     def preload_all(self):
-        """Precarga todos los módulos CUDA disponibles."""
+        """Preloads all available CUDA modules."""
         module_names = ['gfn_cuda']
         
         for name in module_names:
             self.load(name)
 
 
-# Cargador global
+# Global loader
 _module_loader = CudaModuleLoader()
 
-# Intentar cargar módulo CUDA compilado
+# Try to load compiled CUDA module
 _CUDA_MODULE = _module_loader.load('gfn_cuda')
 CUDA_AVAILABLE = _CUDA_MODULE is not None
+gfn_cuda = _CUDA_MODULE
 
 
 # ============================================================================
-# FÁBRICA DE OPERACIONES
+# OPERATION FACTORY
 # ============================================================================
 
 class OperationFactory:
     """
-    Fábrica para crear operaciones con fallbacks automáticos.
+    Factory to create operations with automatic fallbacks.
     
-    Patrón de diseño: Factory Method + Strategy
+    Design pattern: Factory Method + Strategy
     """
     
     _operations: Dict[str, Tuple[Callable, Callable]] = {}
     
     @classmethod
     def register(cls, name: str, cuda_op: Callable, python_op: Callable):
-        """Registra una nueva operación."""
+        """Registers a new operation."""
         cls._operations[name] = (cuda_op, python_op)
     
     @classmethod
     def create(cls, name: str, device: torch.device) -> Callable:
         """
-        Crea una operación para el dispositivo especificado.
+        Creates an operation for the specified device.
         
         Args:
-            name: Nombre de la operación
-            device: Dispositivo de destino (cuda o cpu)
+            name: Operation name
+            device: Target device (cuda or cpu)
         
         Returns:
-            Función de operación lista para usar
+            Operation function ready to use
         """
         if name not in cls._operations:
-            raise ValueError(f"Operación '{name}' no registrada")
+            raise ValueError(f"Operation '{name}' not registered")
         
         cuda_op, python_op = cls._operations[name]
         
@@ -179,7 +180,7 @@ class OperationFactory:
     
     @classmethod
     def has_cuda(cls, name: str) -> bool:
-        """Verifica si la operación tiene implementación CUDA."""
+        """Checks if the operation has a CUDA implementation."""
         if name not in cls._operations:
             return False
         cuda_op, _ = cls._operations[name]
@@ -187,37 +188,37 @@ class OperationFactory:
 
 
 # ============================================================================
-# OPERACIONES BASE (PYTHON FALLBACK)
+# BASE OPERATIONS (PYTHON FALLBACK)
 # ============================================================================
 
 class BaseOperation(ABC):
-    """Clase base para todas las operaciones."""
+    """Base class for all operations."""
     
     @abstractmethod
     def forward(self, *args, **kwargs):
-        """Implementa el forward pass."""
+        """Implements the forward pass."""
         pass
     
     @abstractmethod
     def backward(self, *args, **kwargs):
-        """Implementa el backward pass."""
+        """Implements the backward pass."""
         pass
 
 
 class ChristoffelOperation(BaseOperation):
     """
-    Operación de símbolos de Christoffel con descomposición low-rank.
+    Christoffel symbols operation with low-rank decomposition.
     
-    Computa: Γ^k_ij = Σ_r λ_kr * (U_ir * U_jr)
+    Computes: Γ^k_ij = Σ_r λ_kr * (U_ir * U_jr)
     
-    Donde:
-    - v: Velocidades [batch, dim]
-    - U, W: Matrices de descomposición [dim, rank]
-    - x: Posiciones (opcional) [batch, dim]
-    - V_w: Pesos de potencial (opcional) [1, dim]
+    Where:
+    - v: Velocities [batch, dim]
+    - U, W: Decomposition matrices [dim, rank]
+    - x: Positions (optional) [batch, dim]
+    - V_w: Potential weights (optional) [1, dim]
     
     Returns:
-        gamma: Símbolos de Christoffel [batch, dim]
+        gamma: Christoffel symbols [batch, dim]
     """
     
     def __init__(self, config: Optional[Dict] = None):
@@ -225,7 +226,7 @@ class ChristoffelOperation(BaseOperation):
         self._init_constants()
     
     def _init_constants(self):
-        """Inicializa las constantes desde la configuración."""
+        """Initializes constants from configuration."""
         self.curvature_clamp = self.config.get('curvature_clamp', CudaConstants.CURVATURE_CLAMP)
         self.epsilon = self.config.get('epsilon', CudaConstants.EPSILON_STANDARD)
         self.singularity_gate_slope = self.config.get('singularity_gate_slope', CudaConstants.SINGULARITY_GATE_SLOPE)
@@ -238,38 +239,38 @@ class ChristoffelOperation(BaseOperation):
                 sing_strength: float = 2.0,
                 topology: int = 0) -> torch.Tensor:
         """
-        Forward pass de Christoffel.
+        Christoffel forward pass.
         
         Args:
-            v: Velocidades de entrada [B, D]
-            U: Matriz U de descomposición [D, R]
-            W: Matriz W de descomposición [D, R]
-            x: Posiciones (opcional) [B, D]
-            V_w: Pesos de potencial (opcional) [1, D]
-            plasticity: Coeficiente de plasticidad de curvatura
-            sing_thresh: Umbral de singularidad
-            sing_strength: Fuerza de singularidad
-            topology: Tipo de topología (0=euclidiana, 1=tórica)
+            v: Input velocities [B, D]
+            U: Decomposition matrix U [D, R]
+            W: Decomposition matrix W [D, R]
+            x: Positions (optional) [B, D]
+            V_w: Potential weights (optional) [1, D]
+            plasticity: Curvature plasticity coefficient
+            sing_thresh: Singularity threshold
+            sing_strength: Singularity strength
+            topology: Topology type (0=Euclidean, 1=Toroidal)
         
         Returns:
-            gamma: Símbolos de Christoffel [B, D]
+            gamma: Christoffel symbols [B, D]
         """
-        # Proyección de velocidad: h = U^T v
+        # Velocity projection: h = U^T v
         h = torch.matmul(v, U)  # [B, R]
         
-        # Normalización de energía
+        # Energy normalization
         energy = torch.sum(h * h, dim=-1, keepdim=True) / max(1, h.shape[-1])
         scale = 1.0 / (1.0 + torch.sqrt(energy) + self.epsilon)
         
-        # Factor de plasticidad
+        # Plasticity factor
         M = 1.0
         if plasticity != 0.0:
             E = torch.sum(v * v, dim=-1, keepdim=True) / max(1, v.shape[-1])
             M = 1.0 + plasticity * 0.1 * torch.tanh(E)
         
-        # Singularidades (amplificación de curvatura)
+        # Singularities (curvature amplification)
         if x is not None and V_w is not None and V_w.numel() > 0:
-            if topology == 1:  # Tórica
+            if topology == 1:  # Toroidal
                 pot = torch.sum(torch.sin(x) * V_w, dim=-1, keepdim=True)
             else:
                 pot = torch.sum(x * V_w, dim=-1, keepdim=True)
@@ -293,12 +294,12 @@ class ChristoffelOperation(BaseOperation):
                  sing_strength: float = 2.0,
                  topology: int = 0) -> Tuple[torch.Tensor, ...]:
         """
-        Backward pass de Christoffel usando autograd de PyTorch.
+        Christoffel backward pass using PyTorch autograd.
         
         Returns:
-            Tupla de gradientes: (dv, dU, dW, dx, dV_w)
+            Gradient tuple: (dv, dU, dW, dx, dV_w)
         """
-        # Usar autograd de PyTorch para gradientes
+        # Use PyTorch autograd for gradients
         if output is None:
             output = self.forward(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology)
         
@@ -309,7 +310,7 @@ class ChristoffelOperation(BaseOperation):
             retain_graph=True
         )
         
-        # Completar gradientes None con ceros
+        # Fill None gradients with zeros
         result = []
         for i, (tensor, grad) in enumerate([(v, grads[0]), (U, grads[1]), (W, grads[2])]):
             if grad is None:
@@ -317,7 +318,7 @@ class ChristoffelOperation(BaseOperation):
             else:
                 result.append(grad)
         
-        # Para x y V_w (opcionales)
+        # For x and V_w (optional)
         if x is not None:
             result.append(grads[3] if grads[3] is not None else torch.zeros_like(x))
         if V_w is not None and V_w.numel() > 0:
@@ -339,8 +340,9 @@ def launch_toroidal_leapfrog_fused(
     dt: float,
     batch: int,
     seq_len: int,
-    dim: int
-) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    dim: int,
+    hysteresis_state: Optional[torch.Tensor] = None
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Launch dedicated toroidal leapfrog fused kernel.
     
@@ -383,8 +385,9 @@ def launch_toroidal_leapfrog_fused(
         v_final = v_out[:, -1, :]  # [batch, dim]
         x_seq = x_out  # [batch, seq_len, dim]
         reg_loss = torch.tensor(0.0, device=x.device)  # No regularization for now
+        h_state = hysteresis_state if hysteresis_state is not None else torch.empty(0, device=x.device, dtype=x.dtype)
         
-        return (x_final, v_final, x_seq, reg_loss)
+        return (x_final, v_final, x_seq, reg_loss, h_state)
         
     except (ImportError, AttributeError) as e:
         # CUDA module not compiled yet - this is expected
@@ -395,27 +398,27 @@ def launch_toroidal_leapfrog_fused(
 
 class LeapfrogOperation(BaseOperation):
     """
-    Integrador Leapfrog (Stormer-Verlet) simpléctico.
+    Symplectic Leapfrog (Stormer-Verlet) integrator.
     
-    Implementa:
-    - Kick-Drift-Kick con fricción implícita
-    - Frontera tórica (wrapping)
-    - Soporte de histéresis
+    Implements:
+    - Kick-Drift-Kick with implicit friction
+    - Toroidal boundary (wrapping)
+    - Hysteresis support
     
     Args:
-        x: Posiciones [B, D]
-        v: Velocidades [B, D]
-        f: Fuerzas externas [B, D]
-        U, W: Matrices de Christoffel
-        dt: Paso de tiempo base
-        dt_scale: Escala de dt por capa/cabeza
-        steps: Número de subpasos
-        topology: Tipo de topología
-        Wf, bf: Pesos de fricción
-        plasticity: Plasticidad de curvatura
+        x: Positions [B, D]
+        v: Velocities [B, D]
+        f: External forces [B, D]
+        U, W: Christoffel matrices
+        dt: Base time step
+        dt_scale: Time step scale per layer/head
+        steps: Number of substeps
+        topology: Topology type
+        Wf, bf: Friction weights
+        plasticity: Curvature plasticity
     
     Returns:
-        x_out, v_out: Posiciones y velocidades actualizadas
+        x_out, v_out: Updated positions and velocities
     """
     
     def __init__(self, config: Optional[Dict] = None):
@@ -423,7 +426,7 @@ class LeapfrogOperation(BaseOperation):
         self._init_constants()
     
     def _init_constants(self):
-        """Inicializa las constantes."""
+        """Initializes constants."""
         self.friction_scale = self.config.get('friction_scale', CudaConstants.FRICTION_SCALE)
         self.epsilon = self.config.get('epsilon', CudaConstants.EPSILON_STANDARD)
         self.dt = self.config.get('dt', CudaConstants.DEFAULT_DT)
@@ -436,19 +439,21 @@ class LeapfrogOperation(BaseOperation):
                 topology: int = 0,
                 Wf: Optional[torch.Tensor] = None,
                 bf: Optional[torch.Tensor] = None,
-                plasticity: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor]:
+                plasticity: float = 0.0,
+                sing_thresh: float = 0.5,
+                sing_strength: float = 2.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass del integrador Leapfrog.
+        Leapfrog integrator forward pass.
         """
-        # Calcular dt efectivo
+        # Calculate effective dt
         eff_dt = self.dt * dt_scale
         h = 0.5 * eff_dt
         
-        # Copiar estados iniciales
+        # Copy initial states
         curr_x = x.clone()
         curr_v = v.clone()
         
-        # Inicializar estado de histéresis
+        # Initialize hysteresis state
         h_state = None
         
         christoffel_op = ChristoffelOperation({
@@ -457,7 +462,7 @@ class LeapfrogOperation(BaseOperation):
         })
         
         for _ in range(steps):
-            # 1. Calcular coeficiente de fricción
+            # 1. Calculate friction coefficient
             mu = torch.zeros_like(v)
             if Wf is not None and bf is not None:
                 feat = curr_x
@@ -467,15 +472,15 @@ class LeapfrogOperation(BaseOperation):
                 mu = torch.sigmoid(gate) * self.friction_scale
             
             # 2. Kick 1
-            gamma = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity)
+            gamma = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity, sing_thresh, sing_strength, topology)
             curr_v = (curr_v + h * (f - gamma)) / (1.0 + h * mu + self.epsilon)
             
             # 3. Drift
             curr_x = curr_x + eff_dt * curr_v
             
-            # AUDIT FIX: Apply toroidal boundary with smooth wrapping (match CUDA [0, 2pi])
+            # Apply toroidal boundary with smooth wrapping (match Python)
             if topology == 1:
-                curr_x = torch.remainder(curr_x, self.toroidal_period)
+                curr_x = torch.atan2(torch.sin(curr_x), torch.cos(curr_x))
             
             # 4. Kick 2
             if Wf is not None and bf is not None:
@@ -485,7 +490,7 @@ class LeapfrogOperation(BaseOperation):
                 gate = torch.matmul(feat, Wf.t()) + bf
                 mu = torch.sigmoid(gate) * self.friction_scale
             
-            gamma2 = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity)
+            gamma2 = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity, sing_thresh, sing_strength, topology)
             curr_v = (curr_v + h * (f - gamma2)) / (1.0 + h * mu + self.epsilon)
         
         return curr_x, curr_v
@@ -498,16 +503,18 @@ class LeapfrogOperation(BaseOperation):
                  topology: int = 0,
                  Wf: Optional[torch.Tensor] = None,
                  bf: Optional[torch.Tensor] = None,
-                 plasticity: float = 0.0) -> Tuple[torch.Tensor, ...]:
+                 plasticity: float = 0.0,
+                 sing_thresh: float = 0.5,
+                 sing_strength: float = 2.0) -> Tuple[torch.Tensor, ...]:
         """
-        Backward pass del integrador Leapfrog.
+        Leapfrog integrator backward pass.
         
         Returns:
-            Tupla de gradientes
+            Gradient tuple
         """
-        # Usar autograd de PyTorch
+        # Use PyTorch autograd
         def leapfrog_fn(x, v):
-            return self.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity)
+            return self.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength)
         
         return torch.autograd.grad(
             leapfrog_fn(x, v),
@@ -518,13 +525,13 @@ class LeapfrogOperation(BaseOperation):
         )
 
 
-# Registrar operaciones en la fábrica
+# Register operations in factory
 OperationFactory.register('christoffel', None, ChristoffelOperation)
 OperationFactory.register('leapfrog', None, LeapfrogOperation)
 
 
 # ============================================================================
-# INTERFAZ PÚBLICA DEL MÓDULO
+# MODULE PUBLIC INTERFACE
 # ============================================================================
 
 def christoffel_fused(v: torch.Tensor, U: torch.Tensor, W: torch.Tensor,
@@ -537,12 +544,12 @@ def christoffel_fused(v: torch.Tensor, U: torch.Tensor, W: torch.Tensor,
                       R: float = 2.0,
                       r: float = 1.0) -> torch.Tensor:
     """
-    Interfaz pública para Christoffel fused.
+    Public interface for Christoffel fused.
     
-    Detecta automáticamente si usar CUDA o Python fallback.
+    Automatically detects whether to use CUDA or Python fallback.
     """
     if CUDA_AVAILABLE and v.is_cuda:
-        # Usar autograd wrapper si está disponible
+        # Use autograd wrapper if available
         try:
             from .autograd import christoffel_fused_autograd
             return christoffel_fused_autograd(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology, R, r)
@@ -563,6 +570,8 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
                    Wf: Optional[torch.Tensor] = None,
                    bf: Optional[torch.Tensor] = None,
                    plasticity: float = 0.0,
+                   sing_thresh: float = 0.5,
+                   sing_strength: float = 2.0,
                    R: float = 2.0,
                    r: float = 1.0,
                    # AUDIT FIX (Component 7): Hysteresis parameters with defaults
@@ -582,7 +591,7 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
         try:
             from .autograd import leapfrog_fused_autograd
             return leapfrog_fused_autograd(
-                x, v, f, U, W, dt, dt_scale, steps, topology, Wf, bf, plasticity, R, r,
+                x, v, f, U, W, dt, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength, R, r,
                 hysteresis_state, hyst_update_w, hyst_update_b, 
                 hyst_readout_w, hyst_readout_b, hyst_decay, hyst_enabled
             )
@@ -591,7 +600,90 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
     
     # Python fallback
     op = LeapfrogOperation({'dt': dt, 'friction_scale': CudaConstants.FRICTION_SCALE, 'epsilon': CudaConstants.EPSILON_STANDARD})
-    return op.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity)
+    return op.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength)
+
+
+def head_mixing_fused(x_heads: torch.Tensor, v_heads: torch.Tensor,
+                      W_x: torch.Tensor, W_v: torch.Tensor,
+                      topology: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+    if CUDA_AVAILABLE and x_heads.is_cuda:
+        try:
+            import gfn_cuda
+            if hasattr(gfn_cuda, 'head_mixing_fused'):
+                return gfn_cuda.head_mixing_fused(x_heads, v_heads, W_x, W_v, int(topology))
+        except Exception:
+            pass
+    batch = x_heads.shape[1]
+    x_cat = x_heads.permute(1, 0, 2).contiguous().view(batch, -1)
+    v_cat = v_heads.permute(1, 0, 2).contiguous().view(batch, -1)
+    if topology == 1:
+        v_mix = torch.tanh(v_cat / 100.0)
+        mixer_in_x = torch.cat([torch.sin(x_cat), torch.cos(x_cat), v_mix], dim=-1)
+        x_next = torch.matmul(mixer_in_x, W_x.t())
+    else:
+        x_next = torch.matmul(x_cat, W_x.t())
+    v_next = torch.matmul(v_cat, W_v.t())
+    if topology == 1:
+        x_next = torch.atan2(torch.sin(x_next), torch.cos(x_next))
+    v_next = 100.0 * torch.tanh(v_next / 100.0)
+    return x_next, v_next
+
+
+def dynamic_gating_fused(x: torch.Tensor, W1: torch.Tensor, b1: torch.Tensor,
+                         W2: torch.Tensor, b2: torch.Tensor) -> torch.Tensor:
+    if CUDA_AVAILABLE and x.is_cuda:
+        try:
+            import gfn_cuda
+            if hasattr(gfn_cuda, 'dynamic_gating_fused'):
+                return gfn_cuda.dynamic_gating_fused(x, W1, b1, W2, b2)
+        except Exception:
+            pass
+    hidden = torch.tanh(torch.matmul(x, W1.t()) + b1)
+    out = torch.matmul(hidden, W2.t()) + b2
+    return torch.sigmoid(out)
+
+
+def recurrent_manifold_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
+                             U_stack: torch.Tensor, W_stack: torch.Tensor,
+                             dt: float, dt_scales: torch.Tensor,
+                             forget_rates: torch.Tensor, num_heads: int,
+                             plasticity: float = 0.0, sing_thresh: float = 0.5,
+                             sing_strength: float = 2.0,
+                             mix_x: Optional[torch.Tensor] = None,
+                             mix_v: Optional[torch.Tensor] = None,
+                             Wf: Optional[torch.Tensor] = None,
+                             Wi: Optional[torch.Tensor] = None,
+                             bf: Optional[torch.Tensor] = None,
+                             Wp: Optional[torch.Tensor] = None,
+                             bp: Optional[torch.Tensor] = None,
+                             topology: int = 0,
+                             R: float = 2.0, r: float = 1.0,
+                             **kwargs) -> Optional[Tuple]:
+    if CUDA_AVAILABLE and x.is_cuda:
+        try:
+            import gfn_cuda
+            dt_scale = float(dt_scales.mean().item()) if isinstance(dt_scales, torch.Tensor) else float(dt_scales)
+            result = gfn_cuda.recurrent_manifold_fused(
+                x.contiguous(), v.contiguous(), f.contiguous(),
+                U_stack.contiguous(), W_stack.contiguous(),
+                float(dt), float(dt_scale), int(num_heads)
+            )
+            if isinstance(result, (tuple, list)) and len(result) == 4:
+                return (*result, None)
+            return result
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+
+    from .autograd import recurrent_manifold_fused_autograd
+    return recurrent_manifold_fused_autograd(
+        x=x, v=v, f=f,
+        U_stack=U_stack, W_stack=W_stack,
+        dt=dt, dt_scales=dt_scales, forget_rates=forget_rates, num_heads=num_heads,
+        plasticity=plasticity, sing_thresh=sing_thresh, sing_strength=sing_strength,
+        mix_x=mix_x, mix_v=mix_v, Wf=Wf, Wi=Wi, bf=bf, Wp=Wp, bp=bp,
+        topology=topology, R=R, r=r,
+        **kwargs
+    )
 
 
 # Alias para compatibilidad

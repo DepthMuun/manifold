@@ -54,8 +54,8 @@ READOUT_GAIN = 2.0  # Was 10.0
 # ============================================================================
 
 # Curvature clamping limit - REDUCED for stability
-# AUDIT FIX: Reduced to prevent excessive curvature amplification
-CURVATURE_CLAMP = 3.0  # Was 5.0 - Tighter bounds for stability
+# Valor Python estable
+CURVATURE_CLAMP = 3.0
 
 # Toroidal curvature scale
 TOROIDAL_CURVATURE_SCALE = 0.01  # Was 0.05

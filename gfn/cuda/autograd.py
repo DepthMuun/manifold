@@ -1,18 +1,17 @@
 """
-GFN CUDA Autograd - Módulo de Diferenciación Automática
+GFN CUDA Autograd - Automatic Differentiation Module
 ========================================================
 
-Este módulo proporciona funciones de diferenciación automática para las
-operaciones CUDA del proyecto GFN.
+This module provides automatic differentiation functions for the
+GFN project's CUDA operations.
 
-Funciones disponibles:
+Available functions:
 - christoffel_fused_autograd
 - leapfrog_fused_autograd
 - heun_fused_autograd
 - recurrent_manifold_fused_autograd
 
-Autor: MiniMax Agent
-Fecha: 2026-02-07
+Date: 2026-02-07
 """
 
 import torch
@@ -20,20 +19,21 @@ import torch.nn as nn
 from typing import Optional, Tuple, Dict, Any, List
 from functools import wraps
 import time
+from .core import CudaConstants
 
 
 # ============================================================================
-# REGISTRO DE TIEMPOS
+# TIMING REGISTRY
 # ============================================================================
 
 class TimingRegistry:
     """
-    Registro de tiempos de ejecución para profiling.
+    Execution time registry for profiling.
     
-    Permite:
-    - Medir tiempos de operaciones CUDA vs Python
-    - Acumular estadísticas
-    - Generar informes de rendimiento
+    Allows:
+    - Measuring CUDA vs Python operation times
+    - Accumulating statistics
+    - Generating performance reports
     """
     
     def __init__(self):
@@ -42,15 +42,15 @@ class TimingRegistry:
         self._enabled = False
     
     def enable(self):
-        """Habilita el registro de tiempos."""
+        """Enables timing registration."""
         self._enabled = True
     
     def disable(self):
-        """Deshabilita el registro de tiempos."""
+        """Disables timing registration."""
         self._enabled = False
     
     def record(self, name: str, duration: float):
-        """Registra un tiempo de ejecución."""
+        """Records an execution time."""
         if not self._enabled:
             return
         
@@ -62,7 +62,7 @@ class TimingRegistry:
         self._counts[name] += 1
     
     def get_stats(self, name: str) -> Optional[Dict[str, float]]:
-        """Obtiene estadísticas de una operación."""
+        """Gets statistics for an operation."""
         if name not in self._timings or not self._timings[name]:
             return None
         
@@ -77,20 +77,20 @@ class TimingRegistry:
         }
     
     def get_all_stats(self) -> Dict[str, Dict[str, float]]:
-        """Obtiene estadísticas de todas las operaciones."""
+        """Gets statistics for all operations."""
         return {name: self.get_stats(name) for name in self._timings}
     
     def reset(self):
-        """Reinicia todas las estadísticas."""
+        """Resets all statistics."""
         self._timings = {}
         self._counts = {}
     
     def summary(self) -> str:
-        """Genera un resumen formateado."""
+        """Generates a formatted summary."""
         if not self._timings:
-            return "Sin datos de timing registrados"
+            return "No timing data recorded"
         
-        lines = ["=" * 60, "RESUMEN DE TIEMPOS DE EJECUCIÓN", "=" * 60]
+        lines = ["=" * 60, "EXECUTION TIME SUMMARY", "=" * 60]
         
         for name, stats in self.get_all_stats().items():
             if stats:
@@ -104,20 +104,20 @@ class TimingRegistry:
         return "\n".join(lines)
 
 
-# Instancia global del registro de tiempos
+# Global timing registry instance
 timing_registry = TimingRegistry()
 
 
 # ============================================================================
-# DECORADORES DE TIMING
+# TIMING DECORATORS
 # ============================================================================
 
 def timed_operation(name: Optional[str] = None):
     """
-    Decorador para medir tiempos de ejecución de operaciones.
+    Decorator to measure operation execution times.
     
     Args:
-        name: Nombre de la operación (usa nombre de función si no se especifica)
+        name: Operation name (uses function name if not specified)
     """
     def decorator(func):
         op_name = name or func.__name__
@@ -138,14 +138,14 @@ def timed_operation(name: Optional[str] = None):
 
 
 # ============================================================================
-# FUNCIONES AUTOGRAD
+# AUTOGRAD FUNCTIONS
 # ============================================================================
 
 class ChristoffelAutogradFunction(torch.autograd.Function):
     """
-    Función autograd para Christoffel fused.
+    Autograd function for fused Christoffel.
     
-    Implementa forward y backward para diferenciación automática.
+    Implements forward and backward for automatic differentiation.
     """
     
     @staticmethod
@@ -156,10 +156,10 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         """
         Forward pass.
         """
-        # Determinar dispositivo
+        # Determine device
         is_cuda = v.is_cuda
         
-        # Asegurar tensores contiguos
+        # Ensure contiguous tensors
         v = v.contiguous()
         U = U.contiguous()
         W = W.contiguous()
@@ -174,7 +174,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         else:
             V_w = torch.empty(0, device=v.device, dtype=v.dtype)
         
-        # Intentar usar CUDA
+        # Try using CUDA
         if is_cuda:
             try:
                 import gfn_cuda
@@ -184,7 +184,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
                     int(topology), float(R), float(r)
                 )
                 
-                # Guardar tensores para backward
+                # Save tensors for backward
                 ctx.save_for_backward(v, U, W, x, V_w, gamma)
                 ctx.plasticity = plasticity
                 ctx.sing_thresh = sing_thresh
@@ -199,7 +199,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             except (ImportError, AttributeError):
                 pass
         
-        # Fallback a Python
+        # Fallback to Python
         from .ops import ChristoffelOperation
         
         op = ChristoffelOperation({
@@ -210,7 +210,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         
         gamma = op.forward(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology)
         
-        # Guardar tensores para backward
+        # Save tensors for backward
         ctx.save_for_backward(v, U, W, x, V_w)
         ctx.plasticity = plasticity
         ctx.sing_thresh = sing_thresh
@@ -232,7 +232,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         our expected structure. We now validate the length and provide clear
         error messages if there's a mismatch.
         """
-        # Recuperar tensores guardados
+        # Recover saved tensors
         saved = ctx.saved_tensors
         if len(saved) == 6:
             v, U, W, x, V_w, gamma = saved
@@ -244,7 +244,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         # Christoffel backward returns: dv, dU, dW, dx, dV_w, + 6 None params = 11 total
         EXPECTED_GRADIENTS = 11
         
-        # Intentar backward de CUDA
+        # Try CUDA backward
         if getattr(ctx, 'is_cuda', False):
             try:
                 import gfn_cuda
@@ -277,8 +277,8 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             except (ImportError, AttributeError):
                 pass
         
-        # Fallback a autograd de PyTorch
-        # Reconstruir output si es necesario
+        # Fallback to PyTorch autograd
+        # Reconstruct output if necessary
         if gamma is None:
             from .ops import ChristoffelOperation
             op = ChristoffelOperation({
@@ -288,14 +288,14 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             })
             gamma = op.forward(v, U, W, x, V_w, ctx.plasticity, ctx.sing_thresh, ctx.sing_strength, ctx.topology)
         
-        # Calcular gradientes usando autograd
+        # Calculate gradients using autograd
         grad_inputs = torch.autograd.grad(
             gamma, [v, U, W, x, V_w], grad_output,
             allow_unused=True,
             retain_graph=False
         )
         
-        # Completar con ceros donde sea necesario
+        # Fill with zeros where necessary
         result = []
         for i, (tensor, grad) in enumerate([
             (v, grad_inputs[0]),
@@ -312,7 +312,7 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             else:
                 result.append(grad)
         
-        # Añadir gradientes None para parámetros no diferenciables
+        # Add None gradients for non-differentiable parameters
         result.extend([None, None, None, None, None, None])
         
         return tuple(result)
@@ -320,9 +320,9 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
 
 class LeapfrogAutogradFunction(torch.autograd.Function):
     """
-    Función autograd para Leapfrog fused.
+    Autograd function for fused Leapfrog.
     
-    Implementa forward y backward para el integrador simpléctico.
+    Implements forward and backward for the symplectic integrator.
     """
     
     @staticmethod
@@ -331,7 +331,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 dt: float, dt_scale: float, steps: int,
                 topology: int,
                 Wf: Optional[torch.Tensor], bf: Optional[torch.Tensor],
-                plasticity: float, R: float, r: float,
+                plasticity: float, sing_thresh: float, sing_strength: float, R: float, r: float,
                 # AUDIT FIX (Component 7): Hysteresis parameters
                 hysteresis_state: torch.Tensor,
                 hyst_update_w: torch.Tensor,
@@ -341,11 +341,11 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 hyst_decay: float,
                 hyst_enabled: bool) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass del integrador Leapfrog.
+        Leapfrog integrator forward pass.
         """
         is_cuda = x.is_cuda
         
-        # Asegurar contiguidad
+        # Ensure contiguity
         x = x.contiguous()
         v = v.contiguous()
         force = force.contiguous()
@@ -362,7 +362,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
         else:
             bf = torch.empty(0, device=x.device, dtype=x.dtype)
         
-        # Intentar usar CUDA
+        # Try using CUDA
         if is_cuda:
             try:
                 import gfn_cuda
@@ -370,7 +370,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 x_out, v_out = gfn_cuda.leapfrog_fused(
                     x, v, force, U, W,
                     float(dt), float(dt_scale), int(steps), int(topology),
-                    Wf, bf, float(plasticity), float(R), float(r),
+                    Wf, bf, float(plasticity), float(sing_thresh), float(sing_strength), float(R), float(r),
                     # AUDIT FIX: Pass hysteresis parameters
                     hysteresis_state, hyst_update_w, hyst_update_b,
                     hyst_readout_w, hyst_readout_b, float(hyst_decay), hyst_enabled
@@ -382,6 +382,8 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 ctx.steps = steps
                 ctx.topology = topology
                 ctx.plasticity = plasticity
+                ctx.sing_thresh = sing_thresh
+                ctx.sing_strength = sing_strength
                 ctx.R = R
                 ctx.r = r
                 # AUDIT FIX: Save hysteresis parameters
@@ -404,12 +406,12 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
         
         op = LeapfrogOperation({
             'dt': dt,
-            'friction_scale': 0.05,
-            'epsilon': 1e-8,
-            'curvature_clamp': 3.0
+            'friction_scale': CudaConstants.FRICTION_SCALE,
+            'epsilon': CudaConstants.EPSILON_STANDARD,
+            'curvature_clamp': CudaConstants.CURVATURE_CLAMP
         })
         
-        x_out, v_out = op.forward(x, v, force, U, W, dt_scale, steps, topology, Wf, bf, plasticity)
+        x_out, v_out = op.forward(x, v, force, U, W, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength)
         
         ctx.save_for_backward(x, v, force, U, W, Wf, bf, x_out, v_out)
         ctx.dt = dt
@@ -417,6 +419,8 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
         ctx.steps = steps
         ctx.topology = topology
         ctx.plasticity = plasticity
+        ctx.sing_thresh = sing_thresh
+        ctx.sing_strength = sing_strength
         ctx.R = R
         ctx.r = r
         ctx.is_cuda = False
@@ -426,7 +430,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_x_out: torch.Tensor, grad_v_out: torch.Tensor) -> Tuple:
         """
-        Backward pass del integrador Leapfrog.
+        Leapfrog integrator backward pass.
         """
         saved = ctx.saved_tensors
         x, v, force, U, W, Wf, bf, x_out, v_out = saved
@@ -439,7 +443,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                     grad_x_out.contiguous(), grad_v_out.contiguous(),
                     x, v, force, U, W, Wf, bf,
                     float(ctx.dt), float(ctx.dt_scale), int(ctx.steps), int(ctx.topology),
-                    float(ctx.plasticity), float(ctx.R), float(ctx.r),
+                    float(ctx.plasticity), float(ctx.sing_thresh), float(ctx.sing_strength), float(ctx.R), float(ctx.r),
                     # AUDIT FIX: Pass hysteresis parameters from ctx
                     ctx.hysteresis_state, ctx.hyst_update_w, ctx.hyst_update_b,
                     ctx.hyst_readout_w, ctx.hyst_readout_b, float(ctx.hyst_decay), ctx.hyst_enabled
@@ -447,24 +451,23 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 
                 # AUDIT FIX: Unpack hysteresis gradients (now 11 outputs instead of 7)
                 return (grads[0], grads[1], grads[2], grads[3], grads[4],
-                        None, None, None, None, grads[5], grads[6], None, None, None,
-                        # Hysteresis gradients
+                        None, None, None, None, grads[5], grads[6], None, None, None, None, None,
                         grads[7], grads[8], grads[9], grads[10], None, None, None)
                 
             except (ImportError, AttributeError):
                 pass
         
-        # Fallback: usar autograd de PyTorch
+        # Fallback: use PyTorch autograd
         def leapfrog_fn(x_in, v_in):
             from .ops import LeapfrogOperation
             op = LeapfrogOperation({
                 'dt': ctx.dt,
-                'friction_scale': 0.05,
-                'epsilon': 1e-8,
-                'curvature_clamp': 3.0
+                'friction_scale': CudaConstants.FRICTION_SCALE,
+                'epsilon': CudaConstants.EPSILON_STANDARD,
+                'curvature_clamp': CudaConstants.CURVATURE_CLAMP
             })
             return op.forward(x_in, v_in, force, U, W, ctx.dt_scale, ctx.steps,
-                            ctx.topology, Wf, bf, ctx.plasticity)
+                            ctx.topology, Wf, bf, ctx.plasticity, ctx.sing_thresh, ctx.sing_strength)
         
         grads = torch.autograd.grad(
             leapfrog_fn(x, v),
@@ -474,7 +477,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
             retain_graph=False
         )
         
-        # Completar resultado
+        # Complete result
         result = []
         for i, (tensor, grad) in enumerate([
             (x, grads[0]), (v, grads[1]), (force, grads[2]),
@@ -482,17 +485,17 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
         ]):
             result.append(grad if grad is not None else torch.zeros_like(tensor))
         
-        # Parámetros adicionales
+        # Additional parameters
         result.extend([None, None, None, None,  # dt, dt_scale, steps, topology
                        grads[5] if len(grads) > 5 else torch.zeros_like(Wf) if Wf.numel() > 0 else None,
                        grads[6] if len(grads) > 6 else torch.zeros_like(bf) if bf.numel() > 0 else None,
-                       None, None, None])  # plasticity, R, r
+                       None, None, None, None, None])  # plasticity, sing_thresh, sing_strength, R, r
         
         return tuple(result)
 
 
 # ============================================================================
-# INTERFAZ PÚBLICA
+# PUBLIC INTERFACE
 # ============================================================================
 
 def christoffel_fused_autograd(v: torch.Tensor, U: torch.Tensor, W: torch.Tensor,
@@ -505,24 +508,24 @@ def christoffel_fused_autograd(v: torch.Tensor, U: torch.Tensor, W: torch.Tensor
                                R: float = 2.0,
                                r: float = 1.0) -> torch.Tensor:
     """
-    Computa símbolos de Christoffel con soporte autograd.
+    Computes Christoffel symbols with autograd support.
     
     Args:
-        v: Velocidades [B, D]
-        U: Matriz U [D, R]
-        W: Matriz W [D, R]
-        x: Posiciones opcionales [B, D]
-        V_w: Pesos de potencial opcionales [1, D]
-        plasticity: Plasticidad de curvatura
-        sing_thresh: Umbral de singularidad
-        sing_strength: Fuerza de singularidad
-        topology: Tipo de topología
-        R, r: Radios del toro (solo para topología tórica)
+        v: Velocities [B, D]
+        U: Matrix U [D, R]
+        W: Matrix W [D, R]
+        x: Optional positions [B, D]
+        V_w: Optional potential weights [1, D]
+        plasticity: Curvature plasticity
+        sing_thresh: Singularity threshold
+        sing_strength: Singularity strength
+        topology: Topology type
+        R, r: Torus radii (only for toroidal topology)
     
     Returns:
-        gamma: Símbolos de Christoffel [B, D]
+        gamma: Christoffel symbols [B, D]
     """
-    # Preparar tensores opcionales
+    # Prepare optional tensors
     if x is None:
         x = torch.empty(0, device=v.device, dtype=v.dtype)
     if V_w is None:
@@ -540,6 +543,8 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
                             Wf: Optional[torch.Tensor] = None,
                             bf: Optional[torch.Tensor] = None,
                             plasticity: float = 0.0,
+                            sing_thresh: float = 0.5,
+                            sing_strength: float = 2.0,
                             R: float = 2.0,
                             r: float = 1.0,
                             # AUDIT FIX (Component 7): Hysteresis parameters with defaults
@@ -551,28 +556,28 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
                             hyst_decay: float = 0.9,
                             hyst_enabled: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Integra sistema Hamiltoniano con soporte autograd.
+    Integrates Hamiltonian system with autograd support.
     
     Args:
-        x: Posiciones [B, D]
-        v: Velocidades [B, D]
-        force: Fuerzas externas [B, D]
-        U, W: Matrices de Christoffel
-        dt: Paso de tiempo base
-        dt_scale: Escala de dt
-        steps: Número de subpasos
-        topology: Tipo de topología
-        Wf, bf: Pesos de fricción
-        plasticity: Plasticidad de curvatura
-        R, r: Radios del toro
-        hysteresis_state: Estado inicial de hysteresis [B, D]
-        hyst_update_w, hyst_update_b: Parámetros de actualización
-        hyst_readout_w, hyst_readout_b: Parámetros de lectura
-        hyst_decay: Decaimiento de hysteresis
-        hyst_enabled: Activar hysteresis
+        x: Positions [B, D]
+        v: Velocities [B, D]
+        force: External forces [B, D]
+        U, W: Christoffel matrices
+        dt: Base time step
+        dt_scale: dt scale
+        steps: Number of substeps
+        topology: Topology type
+        Wf, bf: Friction weights
+        plasticity: Curvature plasticity
+        R, r: Torus radii
+        hysteresis_state: Initial hysteresis state [B, D]
+        hyst_update_w, hyst_update_b: Update parameters
+        hyst_readout_w, hyst_readout_b: Readout parameters
+        hyst_decay: Hysteresis decay
+        hyst_enabled: Enable hysteresis
     
     Returns:
-        x_out, v_out: Estados actualizados
+        x_out, v_out: Updated states
     """
     if Wf is None:
         Wf = torch.empty(0, device=x.device, dtype=x.dtype)
@@ -592,9 +597,9 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
         hyst_readout_b = torch.empty(0, device=x.device, dtype=x.dtype)
     
     return LeapfrogAutogradFunction.apply(
-        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, plasticity, R, r,
-        hysteresis_state, hyst_update_w, hyst_update_b, 
-        hyst_readout_w, hyst_readout_b, hyst_decay, hyst_enabled
+        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength, R, r,
+        hysteresis_state, hyst_update_w, hyst_update_b, hyst_readout_w, hyst_readout_b,
+        hyst_decay, hyst_enabled
     )
 
 
@@ -615,9 +620,9 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
                                        R: float = 2.0, r: float = 1.0,
                                        **kwargs) -> Tuple:
     """
-    Fusión de múltiple capas de manifold (placeholder).
+    Multi-layer manifold fusion (placeholder).
     """
-    # Por ahora, delegar a Python fallback
+    # For now, delegate to Python fallback
     from .ops import ChristoffelOperation
     
     device = x.device
@@ -627,7 +632,7 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
     num_layers = U_stack.shape[0] // num_heads
     head_dim = D // num_heads
     
-    # Implementación simplificada para testing
+    # Simplified implementation for testing
     x_curr = x
     v_curr = v
     x_seq = []
@@ -649,7 +654,7 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
                 v_h = v_curr[:, s:e]
                 f_h = force_t[:, s:e]
                 
-                # Integración simple
+                # Simple integration
                 gamma = christoffel_op.forward(v_h, U_stack[layer_idx * num_heads + h],
                                               W_stack[layer_idx * num_heads + h])
                 
@@ -675,20 +680,20 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
 
 
 def get_timing_stats() -> Dict[str, Dict[str, float]]:
-    """Obtiene estadísticas de timing."""
+    """Gets timing stats."""
     return timing_registry.get_all_stats()
 
 
 def enable_timing():
-    """Habilita el registro de tiempos."""
+    """Enables timing registration."""
     timing_registry.enable()
 
 
 def disable_timing():
-    """Deshabilita el registro de tiempos."""
+    """Disables timing registration."""
     timing_registry.disable()
 
 
 def reset_timing():
-    """Reinicia las estadísticas de timing."""
+    """Resets timing statistics."""
     timing_registry.reset()

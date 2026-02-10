@@ -36,7 +36,7 @@ def test_fractal_tunneling_activation():
             christ.U.zero_()
             christ.W.zero_()
             
-    x_low, v_low, _, christ_low = layer(x, v)
+    x_low, v_low, _, christ_low = layer(x, v, collect_christ=True)
     
     # Without curvature, x_low should be exactly what macro_manifold produces (which is x + v*dt because Gamma=0)
     # And since tunnel_gate should be near 0 (sigmoid(-0.1 * 5)), the micro contribution is negligible.
@@ -48,7 +48,7 @@ def test_fractal_tunneling_activation():
             christ.U.fill_(1.0)
             christ.W.fill_(1.0)
             
-    x_high, v_high, _, christ_high = layer(x, v)
+    x_high, v_high, _, christ_high = layer(x, v, collect_christ=True)
     
     # Calculate curvature estimate manually to verify
     stacked_gamma = torch.stack(christ_high, dim=1)

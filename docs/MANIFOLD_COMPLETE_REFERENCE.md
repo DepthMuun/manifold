@@ -45,7 +45,7 @@ En el límite aristotélico（puro disipativo）， donde la velocidad es propor
 
 ### 1.3 Objetivos de Este Documento
 
-Este documento tiene como objetivo servir como referencia definitiva tanto para humanos como para sistemas de inteligencia artificial que necesitan comprender， implementar o modificar el sistema Manifold。 Los objetivos específicos incluyen：
+Este documento tiene como objetivo servir como referencia definitiva tanto para humanos como para sistemas computacionales que necesitan comprender， implementar o modificar el sistema Manifold。 Los objetivos específicos incluyen：
 
 - Proporcionar una descripción completa de la arquitectura y sus componentes
 - Explicar los fundamentos matemáticos y físicos de manera accesible

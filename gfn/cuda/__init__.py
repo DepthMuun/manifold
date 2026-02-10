@@ -7,6 +7,6 @@ Provides significant speedups by eliminating kernel launch overhead
 and intermediate memory traffic.
 """
 
-from .ops import christoffel_fused, leapfrog_fused
+from .ops import christoffel_fused, leapfrog_fused, recurrent_manifold_fused
 
-__all__ = ['christoffel_fused', 'leapfrog_fused', 'euler_fused', 'heun_fused', 'rk4_fused', 'verlet_fused']
+__all__ = ['christoffel_fused', 'leapfrog_fused', 'recurrent_manifold_fused', 'euler_fused', 'heun_fused', 'rk4_fused', 'verlet_fused']

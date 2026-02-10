@@ -32,6 +32,8 @@ __global__ void leapfrog_backward_kernel(
     int steps,
     int topology_id,
     scalar_t plasticity,
+    scalar_t sing_thresh,
+    scalar_t sing_strength,
     scalar_t R,
     scalar_t r,
     // AUDIT FIX: Hysteresis parameters
@@ -116,7 +118,7 @@ __global__ void leapfrog_backward_kernel(
         } else {
             for (int i = 0; i < dim; ++i) mu_next[i] = 0.0f;
         }
-        christoffel_device(v_mid, U, W, x_next, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gamma_mid);
+        christoffel_device(v_mid, U, W, x_next, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_mid);
         
         scalar_t l_v_mid[64], l_mu_next[64], l_gamma_mid[64];
         for (int i = 0; i < dim; ++i) {
@@ -136,7 +138,7 @@ __global__ void leapfrog_backward_kernel(
         scalar_t gv_c[64], gx_c[64];
         vector_zero(gv_c, dim);
         vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma_mid, gamma_mid, v_mid, U, W, x_next, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        christoffel_backward_device(l_gamma_mid, gamma_mid, v_mid, U, W, x_next, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c);
         for (int i = 0; i < dim; ++i) {
             l_v_mid[i] += gv_c[i];
             lx[i] += gx_c[i];
@@ -156,7 +158,7 @@ __global__ void leapfrog_backward_kernel(
         } else {
             for (int i = 0; i < dim; ++i) mu_n[i] = 0.0f;
         }
-        christoffel_device(v_n, U, W, x_n, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gamma_n);
+        christoffel_device(v_n, U, W, x_n, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_n);
         
         scalar_t l_v_n[64], l_mu_n[64], l_gamma_n[64];
         for (int i = 0; i < dim; ++i) {
@@ -175,7 +177,7 @@ __global__ void leapfrog_backward_kernel(
         // Adjoint of christoffel at v_n, x_n
         vector_zero(gv_c, dim);
         vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma_n, gamma_n, v_n, U, W, x_n, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        christoffel_backward_device(l_gamma_n, gamma_n, v_n, U, W, x_n, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c);
         for (int i = 0; i < dim; ++i) {
             lv[i] = l_v_n[i] + gv_c[i];
             lx[i] += gx_c[i];
@@ -319,7 +321,7 @@ __global__ void leapfrog_forward_traj_kernel(
     const scalar_t* x_in, const scalar_t* v_in, const scalar_t* force,
     const scalar_t* U, const scalar_t* W, const scalar_t* W_forget, const scalar_t* b_forget,
     int batch_size, int dim, int rank, scalar_t dt, scalar_t dt_scale, int steps,
-    int topology_id, scalar_t plasticity, scalar_t R, scalar_t r,
+    int topology_id, scalar_t plasticity, scalar_t sing_thresh, scalar_t sing_strength, scalar_t R, scalar_t r,
     // AUDIT FIX: Hysteresis parameters
     const scalar_t* hysteresis_state_in,
     const scalar_t* hyst_update_w,
@@ -383,7 +385,7 @@ __global__ void leapfrog_forward_traj_kernel(
         } else {
             for (int i = 0; i < dim; ++i) friction[i] = 0.0f;
         }
-        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gamma);
+        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
         for (int i = 0; i < dim; ++i) {
             cv[i] = (cv[i] + h * (f_ptr[i] + f_ghost[i] - gamma[i])) / (1.0f + h * friction[i]);
             traj_v[idx * steps * 2 * dim + (step * 2 + 1) * dim + i] = cv[i]; // Store v_mid
@@ -397,7 +399,7 @@ __global__ void leapfrog_forward_traj_kernel(
         } else {
             for (int i = 0; i < dim; ++i) friction[i] = 0.0f;
         }
-        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, 1.0, 1.0, topology, R, r, gamma);
+        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
         
         // Recompute ghost force after drift
         for (int i = 0; i < dim; ++i) { f_ghost[i] = 0.0f; }
@@ -454,7 +456,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
     torch::Tensor x_in, torch::Tensor v_in, torch::Tensor force,
     torch::Tensor U, torch::Tensor W, torch::Tensor W_forget, torch::Tensor b_forget,
     float dt, float dt_scale, int steps, int topology,
-    float plasticity, float R, float r,
+    float plasticity, float sing_thresh, float sing_strength, float R, float r,
     // AUDIT FIX: Hysteresis parameters
     torch::Tensor hysteresis_state_in,
     torch::Tensor hyst_update_w,
@@ -498,7 +500,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
         U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
         W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
         b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
-        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, R, r,
+        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, sing_thresh, sing_strength, R, r,
         // AUDIT FIX: Hysteresis parameters
         hyst_enabled && hysteresis_state_in.numel() > 0 ? hysteresis_state_in.data_ptr<scalar_t>() : nullptr,
         hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
@@ -519,7 +521,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
         U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
         W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
         b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
-        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, R, r,
+        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, sing_thresh, sing_strength, R, r,
         // AUDIT FIX: Hysteresis parameters for backward
         hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
         hyst_enabled && hyst_update_b.numel() > 0 ? hyst_update_b.data_ptr<scalar_t>() : nullptr,

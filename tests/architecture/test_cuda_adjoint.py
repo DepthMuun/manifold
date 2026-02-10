@@ -14,22 +14,22 @@ def get_numerical_grad(model, inputs, param_name, eps=1e-3):
     grad_num = torch.zeros_like(param)
     
     # Flatten for iteration
-    flat_param = param.view(-1)
     flat_grad = grad_num.view(-1)
     
-    for i in range(flat_param.numel()):
-        # + eps
-        flat_param[i] = orig_data.view(-1)[i] + eps
-        logits_p, _, _ = model(inputs)
+    for i in range(orig_data.numel()):
+        with torch.no_grad():
+            param.data.view(-1)[i] = orig_data.view(-1)[i] + eps
+        logits_p = model(inputs)[0]
         loss_p = logits_p.pow(2).sum()
         
-        # - eps
-        flat_param[i] = orig_data.view(-1)[i] - eps
-        logits_m, _, _ = model(inputs)
+        with torch.no_grad():
+            param.data.view(-1)[i] = orig_data.view(-1)[i] - eps
+        logits_m = model(inputs)[0]
         loss_m = logits_m.pow(2).sum()
         
         flat_grad[i] = (loss_p - loss_m) / (2 * eps)
-        flat_param[i] = orig_data.view(-1)[i] # Reset
+        with torch.no_grad():
+            param.data.view(-1)[i] = orig_data.view(-1)[i]
         
     return grad_num
 
@@ -39,11 +39,17 @@ def test_cuda_adjoint_consistency(topology, metrics):
     """
     Compares analytical gradients from CUDA kernel with numerical gradients.
     """
+    if not ops.CUDA_AVAILABLE:
+        pytest.skip("CUDA kernels not available")
+
     dim = 16
     rank = 4
     batch = 2
     seq_len = 3
     
+    physics_config = {
+        "topology": {"type": "torus" if topology == "torus" else "euclidean"}
+    }
     model = Manifold(
         vocab_size=10,
         dim=dim,
@@ -51,7 +57,7 @@ def test_cuda_adjoint_consistency(topology, metrics):
         heads=1,
         rank=rank,
         integrator_type='leapfrog',
-        topology_type=topology,
+        physics_config=physics_config,
         use_scan=False
     ).cuda()
     
@@ -62,26 +68,37 @@ def test_cuda_adjoint_consistency(topology, metrics):
     inputs = torch.randint(0, 10, (batch, seq_len)).cuda()
     
     # 1. Analytical Gradient (CUDA)
-    logits, _, _ = model(inputs)
+    logits = model(inputs)[0]
     loss = logits.pow(2).sum()
     loss.backward()
     
     results = {}
     
-    # Check U, W, and Forget Gates
+    def resolve_param(name_candidates):
+        param_map = dict(model.named_parameters())
+        for name in name_candidates:
+            if name in param_map:
+                return name
+        return None
+
     param_targets = []
     if topology == "low_rank":
-        param_targets = ["layers.0.christoffel_adapter.U", "layers.0.christoffel_adapter.W"]
-    else:
-        # Torus analytical doesn't have U/W usually, but check forget gates and singularity
-        param_targets = []
-        
-    # Check forget gates (Always present)
-    param_targets.append("layers.0.forget_gate.weight")
+        u_name = resolve_param(["layers.0.christoffels.0.U", "layers.0.christoffel_adapter.U"])
+        w_name = resolve_param(["layers.0.christoffels.0.W", "layers.0.christoffel_adapter.W"])
+        if u_name is not None:
+            param_targets.append(u_name)
+        if w_name is not None:
+            param_targets.append(w_name)
+
+    forget_name = resolve_param(["layers.0.christoffels.0.forget_gate.weight", "layers.0.forget_gate.weight"])
+    if forget_name is not None:
+        param_targets.append(forget_name)
     
     # Check singularity parameters if active
     if hasattr(model.layers[0], 'singularity'):
-        param_targets.append("layers.0.singularity.weight")
+        sing_name = resolve_param(["layers.0.singularity.weight"])
+        if sing_name is not None:
+            param_targets.append(sing_name)
 
     for p_name in param_targets:
         analytical = dict(model.named_parameters())[p_name].grad

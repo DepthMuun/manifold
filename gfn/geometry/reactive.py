@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
+from ..constants import CURVATURE_CLAMP
 from .lowrank import LowRankChristoffel
 
 
 class ReactiveChristoffel(LowRankChristoffel):
     """
-    Active Inference: Geometry that reacts to the agent's state.
-    
+    Active Inference: Geometry that reacts to the system's state.
+
     IMPORTANT NOTES FROM AUDITORIA LOGICA (2026-02-06):
     
     1. TERMINOLOGY CLARIFICATION:
@@ -55,11 +56,11 @@ class ReactiveChristoffel(LowRankChristoffel):
         self.curvature_amplification_factor = self.active_cfg.get('singularities', {}).get('strength', 10.0)
 
     def forward(self, v, x=None, force=None, **kwargs):
-        # Try CUDA path with Active Inference
+        # Try CUDA path with Reactive Dynamics
         try:
             from gfn.cuda.ops import christoffel_fused, CUDA_AVAILABLE
             if CUDA_AVAILABLE and v.is_cuda:
-                # Extract Active Inference parameters
+                # Extract Reactive Dynamics parameters
                 x_in = x if x is not None else torch.empty(0, device=v.device)
                 
                 # Singularities require V_w  
@@ -100,7 +101,7 @@ class ReactiveChristoffel(LowRankChristoffel):
         # 2. AUDIT FIX: Curvature Amplification (formerly "Singularities")
         # This is NOT a true mathematical singularity
         # It amplifies curvature for high-semantic-certainty regions
-        if self.active_cfg.get('singularities', {}).get('enabled', False):
+        if self.active_cfg.get('singularities', {}).get('enabled', False) and x is not None:
             # Check Semantic Potential V(x)
             if self.is_torus:
                  x_in = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)

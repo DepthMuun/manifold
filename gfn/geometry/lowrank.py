@@ -176,6 +176,7 @@ class LowRankChristoffel(nn.Module):
             # AUDIT FIX: Add velocity-dependent component
             # Higher velocities experience proportionally more drag
             velocity_magnitude = torch.norm(v, dim=-1, keepdim=True)
+            velocity_magnitude = velocity_magnitude / (self.dim ** 0.5 + EPSILON_STRONG)
             mu = mu_base * (1.0 + self.velocity_friction_scale * velocity_magnitude)
             
             if getattr(self, 'return_friction_separately', False):

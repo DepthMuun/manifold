@@ -1,272 +1,163 @@
-# Core Logic and Mathematics Audit
+# Auditoría lógica y matemática del núcleo Manifold
 
-## Summary
+## Resumen
 
-This document presents a thorough audit of the logical and mathematical core of the Manifold system. The goal is to verify that the implementation correctly reflects the underlying theory and that there are no conceptual errors that could affect training or inference.
+Este documento presenta una auditoría lógica y matemática enfocada en el núcleo MLayer y su integración geométrica. Se analizan las ecuaciones implementadas, la coherencia de la lógica entre versiones (working vs old) y el comportamiento esperado de la topología tórica. El objetivo es validar consistencia teórica, no ejecutar pruebas.
 
-The audit covers four main areas: the implementation of Christoffel symbols, the logic of the integrator backward pass, energy conservation in the loss functions, and the correctness of the variational formulation.
+## 1. Alcance y fuentes
 
-## 1. Christoffel Symbols
+- Núcleo MLayer y mezcla multi‑head: gfn/layers/base.py (working y old).
+- Integración geométrica y operaciones CUDA: gfn/cuda/ops.py (working).
+- Lógica de benchmark y criterios de convergencia: tests/benchmarks/viz/vis_gfn_superiority.py (working y old).
 
-### 1.1 Theoretical Formulation
+## 2. Modelo matemático base (núcleo MLayer)
 
-The Christoffel symbols of the second kind are defined by the metric g and its partial derivatives:
+El estado evoluciona con un sistema geodésico con fricción y fuerza externa:
 
-Γ^k_ij = (1/2) * g^kl * (∂g_li/∂x^j + ∂g_lj/∂x^i - ∂g_ij/∂x^l)
+- dx/dt = v
+- dv/dt = F(x,u) − Γ(x)(v,v) − μ(x,u) ⊙ v
 
-This formula emerges from the condition that the covariant derivative of the metric tensor is zero, and it is the basis for computing geodesics on a Riemannian manifold.
+Donde:
+- Γ(x)(v,v) es la contracción cuadrática en v de los símbolos de Christoffel.
+- μ(x,u) es una compuerta disipativa dependiente del estado y/o fuerza.
 
-### 1.2 Implementation Verification
+La actualización discreta usa un integrador simpléctico (Leapfrog o variantes), con dt escalado por cabeza:
 
-The implementation in geometry/lowrank.py computes Γ^k_ij as follows:
+- dt_base = softplus(dt_params)
+- dt_eff = dt_base ⊙ g(x)
 
-First, the metric is factorized as g = A * A^T + σ² * I, where A is a d×r matrix with r << d. This factorization reduces computational cost from O(d³) to O(d²·r).
+La compuerta temporal g(x) se obtiene con RiemannianGating y está acotada en (0,1).
 
-Second, derivatives of the metric with respect to coordinates are computed. The derivative of g = A*A^T + σ²*I is ∂g/∂x = (∂A/∂x)*A^T + A*(∂A/∂x)^T.
+## 3. Compensación de tiempo y estabilidad (working vs old)
 
-Third, the Christoffel formula is applied using the computed derivatives.
+### 3.1 Escalado dinámico
 
-Algebraic verification confirms that the implementation correctly follows the theoretical formula. The source code in geometry/lowrank.py demonstrates a solid understanding of the required differential geometry.
+En working, dt_base se limita por un rango estable:
 
-### 1.3 Numerical Precision
+- dt_base ← clamp(dt_base, dt_min, dt_max)
 
-The precision of Christoffel symbols depends on the precision of metric derivatives. The system uses PyTorch automatic differentiation to compute these derivatives, which ensures floating-point precision.
+Esto evita pasos excesivos cuando softplus(dt_params) crece sin límite. En old, no existe esta cota, por lo que dt_base puede crecer y amplificar la dinámica.
 
-For well-conditioned metrics, the relative error in Γ^k_ij is typically below 1e-6. For ill-conditioned metrics, the error can rise to 1e-4, which is still acceptable for most applications.
+Implicación lógica:
+- Working introduce un control de estabilidad numérica explícito que no está presente en old.
+- La ecuación implementada difiere por un operador de recorte que cambia el campo de flujo efectivo.
 
-The system includes optional trace normalization that divides the metric by its trace and multiplies by the dimension. This operation preserves the principal directions of the metric while ensuring the trace is constant, preventing numerical singularities.
+## 4. Fricción (compuerta termodinámica)
 
-### 1.4 Conclusion
+La fricción sigue el esquema:
 
-The Christoffel implementation is conceptually correct and numerically stable. The low-rank approximation is a valid optimization that sacrifices some precision in exchange for significant speed.
+- μ(x,u) = σ(W_f · φ(x) + W_i · u + b_f) · s
 
-## 2. Leapfrog Integrator Backward Pass
+Donde:
+- φ(x) = [sin(x), cos(x)] en topología tórica
+- φ(x) = x en topología euclidiana
+- s es la escala de fricción definida en el núcleo CUDA
 
-### 2.1 Theoretical Formulation
+La implementación descompone la matriz de fricción en W_f (estado) y W_i (fuerza). Esta lógica es equivalente en working y old, pero en working se prepara explícitamente el “clutch stacking” para kernels y el mezclado usa v_mix = tanh(v/100).
 
-The Leapfrog integrator (also known as Verlet or Störmer-Verlet) is a second-order integrator for Hamiltonian systems. Its scheme is:
+Implicación lógica:
+- La ecuación de fricción es la misma en ambas versiones, pero la canalización en working está alineada con el kernel y con el mezclado periódico.
 
-1. Kick: p(t + h/2) = p(t) + (h/2) * F(q(t))
-2. Drift: q(t + h) = q(t) + h * g^(-1)(q(t + h/2)) * p(t + h/2)
-3. Kick: p(t + h) = p(t + h/2) + (h/2) * F(q(t + h))
+## 5. Topología tórica y conservación de fase
 
-The backward pass must compute gradients of the loss L with respect to q(t) and p(t), given dL/dq(t+h) and dL/dp(t+h).
+### 5.1 Mezcla periódica
 
-### 2.2 Implementation Verification
+En topología tórica, la mezcla multi‑head usa:
 
-The implementation in cuda/autograd.py defines a differentiable leapfrog_fused_autograd function that implements the forward pass and the corresponding backward pass.
+- mixer_in = [sin(x), cos(x), tanh(v/100)]
+- x_next = W_x · mixer_in
 
-The forward pass follows the standard Leapfrog scheme with the following friction adaptations:
+### 5.2 Proyección a fase
 
-The velocity update includes a friction term that dissipates system energy:
+Working aplica un wrapping suave:
 
-v_new = (v + h * force) / (1 + h * mu)
+- x_next ← atan2(sin(x_next), cos(x_next))
 
-This implicit form is more stable than the explicit form because it prevents the denominator from approaching zero when friction is significant.
+Old no realiza esta proyección tras la mezcla. En CUDA, el integrador Leapfrog usa wrap por módulo 2π en la fase interna, pero el post‑mixing en Python no re‑impone fase en old.
 
-The backward pass correctly implements the chain rule across operations. For each Kick-Drift-Kick step, gradients are propagated backward respecting functional dependencies.
+Implicación lógica:
+- Working preserva continuidad angular tras la mezcla, alineando la representación con la topología.
+- Old puede introducir discontinuidades de fase al mezclar cabezas en salida.
 
-Verification via gradient checking confirms that the automatically computed gradients match numerical finite gradients within floating-point tolerance.
+## 6. Geometrías disponibles (working vs old)
 
-### 2.3 Critical Verification Points
+Working incorpora módulos de curvatura adicionales:
 
-The leapfrog_fused_autograd backward pass has been verified in the following aspects:
+- HierarchicalChristoffel
+- AdaptiveRankChristoffel
 
-Tensor dimensions are consistent across all operations. The input shapes (q, p) and output shapes (q_new, p_new) match. The gradients have the same shapes as their corresponding tensors.
+Old solo expone Reactive/Hyper/Toroidal/Euc/Hyp/Spherical. Esto no cambia la forma de la ecuación, pero sí cambia Γ(x) y por tanto el campo geométrico.
 
-Gradient flow through the denominator (1 + h*mu) is correct. The denominator depends on mu, which is an integrator parameter, and the gradient must flow correctly.
+Implicación lógica:
+- La ecuación es formalmente igual, pero el operador Γ es más expresivo en working.
 
-Propagation through the inverse metric g^(-1) is correct. The metric depends on q, and so does its inverse, so the gradient must correctly compute the derivative of g^(-1) with respect to q.
+## 7. Integración y lógica CUDA
 
-### 2.4 Conclusion
+En working, el Leapfrog en CUDA aplica:
 
-The integrator backward pass is conceptually correct. The implementation uses PyTorch autograd appropriately, and numerical checks confirm its correctness.
+- Kick‑Drift‑Kick con fricción implícita: v ← (v + h(F−Γ)) / (1 + h μ)
+- Wrap tórico: x ← x mod 2π
 
-## 3. Energy Conservation
+La fricción en CUDA usa φ(x) = [sin(x), cos(x)] en topología tórica y agrega término de fuerza si W_i está presente.
 
-### 3.1 Hamiltonian Theory
+Implicación lógica:
+- La integración es coherente con el modelo de fricción y con la topología compacta.
 
-In a Hamiltonian system without friction or external forces, the Hamiltonian H(q,p) is a constant of motion. This means:
+## 8. Lógica del benchmark (sin ejecutar)
 
-dH/dt = 0
+### 8.1 Criterios de convergencia
 
-Energy conservation is a fundamental property of Hamiltonian systems that emerges from system symmetry under time translations (Noether's theorem).
+En working y old, el criterio real es:
 
-In practice, due to the integrator's time discretization, the Hamiltonian is not conserved exactly, but for symplectic integrators like Leapfrog, the error is oscillatory and bounded rather than growing monotonically.
+- acc_threshold = 0.98
+- loss_threshold = 0.2
+- min_steps = 100
+- patience = 20
 
-### 3.2 Hamiltonian Loss
+La lógica de “hits” exige satisfacer simultáneamente acc y loss por “patience” pasos después de min_steps.
 
-The Hamiltonian loss function in losses/hamiltonian.py penalizes deviations from the initial Hamiltonian:
+### 8.2 Desfase entre comentarios y configuración
 
-L_H = λ_H * (H(t) - H(0))²
+En working existen discrepancias entre comentarios y valores reales:
 
-Using the square instead of the absolute value penalizes large deviations more, and the derivative is more numerically stable.
+- El comentario menciona base_dt = 0.05 y ajustes de fricción, pero la configuración define base_dt = 0.4.
+- El encabezado impreso menciona singularity_strength y LEAPFROG_SUBSTEPS, pero la configuración efectiva mantiene valores distintos o no especificados.
 
-The implementation is conceptually simple but effective. The Hamiltonian is computed as:
+Implicación lógica:
+- El código de benchmark está correctamente definido, pero su documentación interna no refleja la configuración efectiva.
 
-H = (1/2) * p^T * g^(-1) * p + V(q)
+## 9. Hallazgos principales
 
-where V(q) is the potential energy that depends on the input.
+- Working introduce un clamp explícito en dt_base que cambia el flujo temporal y mejora estabilidad.
+- Working aplica wrapping suave atan2 tras la mezcla en torus; old no, lo que puede producir discontinuidades.
+- Working habilita curvatura jerárquica/adaptativa; old no.
+- La lógica de fricción y compuertas es coherente entre versiones, con diferencias de canalización y mezcla.
+- El benchmark tiene coherencia interna, pero la documentación embebida no coincide con los parámetros reales.
 
-### 3.3 Conservation Verification
+## 10. Conclusión
 
-Tests in tests/diagnostics/conservation_audit.py verify that the Hamiltonian is reasonably conserved during integration.
+La lógica matemática central es consistente con el modelo geodésico con fricción y topología tórica. Las diferencias entre working y old se concentran en estabilización temporal, preservación de fase y variedad geométrica disponible. No se ejecutaron pruebas ni se alteró el código.
 
-For the Leapfrog integrator with timestep dt=0.05, typical energy drift after 1000 steps is below 0.1% of the initial value, with oscillations of amplitude below 0.5%.
+## 11. Paridad CUDA vs Python (envoltura y constantes)
 
-These values are consistent with the theory of symplectic integrators, which predict energy error O(dt³) per step and oscillatory cumulative error.
+- Envoltura toroidal en integradores:
+  - CUDA (fused Leapfrog) aplica envoltura periódica por módulo 2π: ver LeapfrogOperation forward en [ops.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/ops.py#L477-L480) y utilidad CUDA en [device_utils.cuh](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/src/common/device_utils.cuh#L18-L26).
+  - Python (Leapfrog puro) usa envoltura suave con atan2, que preserva gradientes: ver smooth_boundary_wrap en [leapfrog.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/integrators/symplectic/leapfrog.py#L58-L83) y su uso en el drift [leapfrog.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/integrators/symplectic/leapfrog.py#L173-L178).
+  - Implicación: cerca del corte de fase, fused CUDA puede producir discontinuidades de gradiente diferentes a Python. La salida final de mezcla multi‑head sí proyecta con atan2 en ambos caminos: ver [ops.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/ops.py#L618-L621) y [layers/base.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/layers/base.py#L351-L352).
 
-### 3.4 Interaction with Friction
+- Constantes de estabilidad y fricción:
+  - Epsilon: Python define EPSILON_STANDARD/STRONG/SMOOTH = 1e-7 en [constants.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/constants.py#L93-L105) y CUDA usa 1e-7 en [core.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/core.py#L129-L133). Paridad confirmada.
+  - Escala de fricción: 0.02 en Python [constants.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/constants.py#L74-L83) y en CUDA [core.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/core.py#L124-L128). Paridad confirmada.
+  - Curvature clamp: Python usa 3.0 en [constants.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/constants.py#L56-L59); CUDA usa 2.5 en [core.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/core.py#L134-L137). Diferencia documentada; afecta la saturación de Γ(v,v) en CUDA vs Python.
 
-When friction is added to the system, the Hamiltonian is no longer conserved because friction dissipates energy. The Hamiltonian loss in this case measures expected dissipation, not failed conservation.
+- Parámetros de singularidades en llamadas internas:
+  - En el kernel fused Leapfrog, la llamada a Christoffel usa sing_thresh=1.0 y sing_strength=1.0 (efectivamente desactivado) dentro de [leapfrog_fused.cu](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/src/integrators/symplectic/leapfrog_fused.cu#L110-L114) y [leapfrog_fused.cu](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/src/integrators/symplectic/leapfrog_fused.cu#L142-L146).
+  - La interfaz pública Python de christoffel_fused usa por defecto threshold=0.5 y strength=2.0: ver [ops.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/ops.py#L531-L539).
+  - Implicación: en trayectorias integradas con fused Leapfrog, la amplificación por singularidades no opera; en cálculos independientes de Γ vía christoffel_fused podría operar según configuración. Diferencia controlada por diseño, pero no estricta paridad.
 
-The implemented friction is:
+- Fricción por compuerta:
+  - CUDA compute_friction usa características Fourier en torus y combina fuerza si hay W_input: ver [christoffel_impl.cuh](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/src/geometry/christoffel_impl.cuh#L148-L187).
+  - Python Leapfrog (puro y fused wrapper) usa φ(x) = [sin, cos] en torus: ver [leapfrog.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/integrators/symplectic/leapfrog.py#L164-L168) y [ops.py](file:///d:/ASAS/manifold_mini/manifold_working/gfn/cuda/ops.py#L462-L469,L482-L489). Paridad lógica mantenida.
 
-dp/dt = -μ * p
-
-which results in exponential decay of momentum and therefore of kinetic energy.
-
-### 3.5 Conclusion
-
-The Hamiltonian loss formulation is correct and consistent with theory. The Hamiltonian is appropriately conserved for the Leapfrog integrator, and the loss correctly captures deviations when they occur.
-
-## 4. Variational Formulation
-
-### 4.1 Gibbs Energy Flow Theory
-
-The Manifold model has an alternative formulation as a Gibbs energy flow (GFN). In this formulation, the system evolves to maximize entropy while satisfying consistency constraints.
-
-The Gibbs free energy function is:
-
-F = E[log π(x)] - H(π)
-
-where π is the agent policy and H(π) is the policy entropy. The gradient of F with respect to the model parameters determines the update direction.
-
-### 4.2 Connection with Physics
-
-The variational formulation connects to Hamiltonian physics as follows:
-
-The Hamiltonian H(q,p) can be interpreted as the free energy of the system. Geodesics are the maximum-entropy paths between states. Noether symmetries correspond to system invariants.
-
-This connection is not only mathematical: it provides physical justification for regularization terms and guides the design of new architectures.
-
-### 4.3 Geodesic Loss
-
-The geodesic loss in losses/geodesic.py enforces that model trajectories are geodesic:
-
-L_G = λ_G * ||d²q/dt² + Γ(q)(dq/dt, dq/dt)||²
-
-This expression is exactly the geodesic equation in tensor form. A geodesic trajectory has zero covariant acceleration, which means the particle moves "in a straight line" on the manifold.
-
-### 4.4 Noether Symmetries
-
-The Noether loss (lambda_N) enforces system symmetries. Symmetries are transformations that leave the action invariant, and Noether's theorem establishes that each symmetry corresponds to a conserved quantity.
-
-The current implementation has lambda_N = 0 by default, which means this loss does not contribute to the total loss. This is a conservative choice: the Noether loss can improve generalization but requires knowledge of the relevant symmetries of the problem.
-
-### 4.5 Conclusion
-
-The model's variational formulation is mathematically sound and naturally connects to Hamiltonian physics. The loss terms correctly reflect the theoretical properties of the system.
-
-## 5. CUDA-Python Consistency
-
-### 5.1 Parity Policy
-
-The system implements a strict parity policy between Python and CUDA implementations. This means both implementations must produce identical results within numerical tolerance.
-
-Parity is critical because:
-
-It enables CPU development and debugging with confidence in GPU production results. It facilitates bug identification (if results differ, there is an error somewhere). It guarantees reproducibility across different hardware setups.
-
-### 5.2 Automated Verification
-
-Tests in tests/test_cuda_python_consistency.py verify parity for all critical operations:
-
-Verified operations include the Leapfrog integrator step, Christoffel symbol computation, metric computation, and forward-pass gradients.
-
-The tests report the maximum absolute and relative error for each operation, with defined tolerance thresholds.
-
-### 5.3 Shared Constants
-
-Numeric constants are defined in constants.py and passed to CUDA kernels. This ensures both implementations use the same epsilon, friction, and other parameter values.
-
-The tests explicitly verify that Python constants match CUDA constants.
-
-### 5.4 Conclusion
-
-The parity policy is a solid engineering practice that improves system robustness. Automated checks ensure parity is maintained during development.
-
-## 6. Constants Documentation Review
-
-### 6.1 Friction Constants
-
-Friction constants have been audited and the current values are appropriate for the system:
-
-FRICTION_SCALE = 0.02 is a conservative value that allows manifold exploration without excessive oscillations.
-
-DEFAULT_FRICTION = 0.002 provides minimal base friction for stability.
-
-VELOCITY_FRICTION_SCALE = 0.02 introduces velocity dependence that stabilizes fast dynamics.
-
-### 6.2 Stability Constants
-
-The numerical stability constants are appropriate:
-
-EPSILON_STANDARD = 1e-7 prevents division by near-zero numbers without being excessively large.
-
-EPSILON_STRONG = 1e-7 provides additional protection in critical operations.
-
-CLAMP_MIN_STRONG = 1e-7 ensures denominators are never too small.
-
-### 6.3 Loss Constants
-
-The default loss weights are conservative:
-
-LAMBDA_H_DEFAULT = 0.0 disables Hamiltonian loss by default. This is a conservative choice: the loss can cause underfitting if too high.
-
-LAMBDA_G_DEFAULT = 0.00005 provides gentle geodesic regularization without over-constraining the model.
-
-LAMBDA_K_DEFAULT = 0.0001 adds a mild kinetic energy penalty.
-
-### 6.4 Conclusion
-
-Constant values have been selected to balance stability and expressive capacity. Users who need different behavior can adjust these values to their needs.
-
-## 7. Findings and Recommendations
-
-### 7.1 Strengths
-
-The Manifold system implementation demonstrates a solid understanding of Hamiltonian mechanics and differential geometry. The code is well organized and the abstractions are appropriate.
-
-The CUDA-Python parity policy is an exemplary practice that ensures robustness. Automated tests provide confidence in code correctness.
-
-Implementation documentation, while improvable, provides enough context to understand design decisions.
-
-### 7.2 Areas for Improvement
-
-The code documentation could be more detailed, especially for complex mathematical operations. We recommend adding docstrings that explain the theoretical formulation of each function.
-
-Integration tests could cover more use cases, including extreme parameter configurations.
-
-Constants documentation could include more context about why certain values were chosen and how they affect system behavior.
-
-### 7.3 Final Verification
-
-After this audit, it is concluded that the logical and mathematical core of the Manifold system is correctly implemented. Critical operations (Christoffel, Leapfrog, losses) accurately reflect the underlying theory.
-
-No conceptual errors were identified that could affect training or inference. The system is ready for production use after standard integration tests.
-
-## Appendix: Checklist
-
-- [x] Christoffel symbols correctly computed
-- [x] Integrator backward pass verified
-- [x] Energy conservation validated
-- [x] Variational formulation consistent
-- [x] CUDA-Python parity verified
-- [x] Constants documented and appropriate
-- [x] Automated tests present
-- [x] Code well organized and modular
-
----
-
-**Manifold Labs (Joaquín Stürtz)**
+Conclusión de paridad:
+- La principal divergencia práctica está en la envoltura de posición durante la integración: módulo 2π (CUDA fused) vs atan2 suave (Python puro). Las constantes clave de fricción y epsilons están sincronizadas; curvature clamp difiere (2.5 vs 3.0) y la activación de singularidades en fused Leapfrog está anulada por parámetros internos.
