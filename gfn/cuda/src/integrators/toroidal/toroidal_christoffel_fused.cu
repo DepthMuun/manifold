@@ -172,6 +172,8 @@ GFN_GLOBAL void toroidal_leapfrog_fused_kernel(
     const scalar_t* x,
     const scalar_t* v,
     const scalar_t* f,
+    const scalar_t* W_forget,   // [dim, feat_dim] or nullptr for DEFAULT_FRICTION
+    const scalar_t* b_forget,   // [dim] or nullptr
     scalar_t R,
     scalar_t r,
     scalar_t dt,
@@ -194,7 +196,7 @@ GFN_GLOBAL void toroidal_leapfrog_fused_kernel(
     for (int i = 0; i < dim; ++i) {
         curr_x[i] = x[tid * dim + i];
         curr_v[i] = v[tid * dim + i];
-        friction[i] = DEFAULT_FRICTION;  // Simple constant friction for now
+        friction[i] = DEFAULT_FRICTION;  // Default fallback
     }
     
     // Integrate sequence
@@ -202,6 +204,23 @@ GFN_GLOBAL void toroidal_leapfrog_fused_kernel(
         const scalar_t* f_ptr = &f[tid * seq_len * dim + t * dim];
         scalar_t h = dt * 0.5f;  // Half time step
         scalar_t effective_dt = dt;
+        
+        // BUG-8 FIX: Compute learned friction if weights are provided
+        if (W_forget != nullptr && b_forget != nullptr) {
+            int feat_dim = 2 * dim; // Toroidal: [sin(x), cos(x)]
+            scalar_t features[256]; // Max dim=128 after doubling
+            for (int i = 0; i < dim; ++i) {
+                features[i] = sinf(curr_x[i]);
+                features[dim + i] = cosf(curr_x[i]);
+            }
+            for (int i = 0; i < dim; ++i) {
+                scalar_t gate = b_forget[i];
+                for (int j = 0; j < feat_dim; ++j) {
+                    gate += W_forget[i * feat_dim + j] * features[j];
+                }
+                friction[i] = 1.0f / (1.0f + expf(-gate)) * FRICTION_SCALE;
+            }
+        }
         
         // 1. Compute toroidal Christoffel force at current state
         toroidal_christoffel_full(curr_x, curr_v, dim, R, r, gamma);
@@ -265,6 +284,8 @@ void launch_toroidal_leapfrog_fused(
     const scalar_t* x,
     const scalar_t* v,
     const scalar_t* f,
+    const scalar_t* W_forget,
+    const scalar_t* b_forget,
     scalar_t R,
     scalar_t r,
     scalar_t dt,
@@ -275,13 +296,11 @@ void launch_toroidal_leapfrog_fused(
     scalar_t* v_out,
     cudaStream_t stream = 0
 ) {
-    // Kernel configuration
     int block_size = 256;
     int grid_size = (batch + block_size - 1) / block_size;
     
-    // Launch kernel
     toroidal_leapfrog_fused_kernel<<<grid_size, block_size, 0, stream>>>(
-        x, v, f, R, r, dt, batch, seq_len, dim, x_out, v_out
+        x, v, f, W_forget, b_forget, R, r, dt, batch, seq_len, dim, x_out, v_out
     );
     
     // Check for errors
@@ -301,15 +320,17 @@ void launch_toroidal_leapfrog_fused(
 using namespace gfn::cuda;
 
 std::vector<at::Tensor> toroidal_leapfrog_fused(
-    at::Tensor x,           // [batch, dim]
-    at::Tensor v,           // [batch, dim]
-    at::Tensor f,           // [batch, seq_len, dim]
+    at::Tensor x,
+    at::Tensor v,
+    at::Tensor f,
     float R,
     float r,
     float dt,
     int64_t batch,
     int64_t seq_len,
-    int64_t dim
+    int64_t dim,
+    at::Tensor W_forget,
+    at::Tensor b_forget
 ) {
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
@@ -325,10 +346,15 @@ std::vector<at::Tensor> toroidal_leapfrog_fused(
     auto x_out = at::empty({batch, seq_len, dim}, options);
     auto v_out = at::empty({batch, seq_len, dim}, options);
 
+    const scalar_t* W_forget_ptr = (W_forget.numel() > 0) ? W_forget.data_ptr<scalar_t>() : nullptr;
+    const scalar_t* b_forget_ptr = (b_forget.numel() > 0) ? b_forget.data_ptr<scalar_t>() : nullptr;
+
     launch_toroidal_leapfrog_fused(
         x.data_ptr<scalar_t>(),
         v.data_ptr<scalar_t>(),
         f.data_ptr<scalar_t>(),
+        W_forget_ptr,
+        b_forget_ptr,
         static_cast<scalar_t>(R),
         static_cast<scalar_t>(r),
         static_cast<scalar_t>(dt),

@@ -50,9 +50,9 @@ except ImportError:
 try:
     from gfn.constants import FRICTION_SCALE, EPSILON_STANDARD, DEFAULT_DT
 except ImportError:
-    FRICTION_SCALE = 0.05
-    EPSILON_STANDARD = 1e-8
-    DEFAULT_DT = 0.02
+    FRICTION_SCALE = 0.02
+    EPSILON_STANDARD = 1e-7
+    DEFAULT_DT = 0.05
 
 
 def smooth_boundary_wrap(x, topology_id=1):
@@ -74,11 +74,10 @@ def smooth_boundary_wrap(x, topology_id=1):
     """
     if topology_id == 0:
         return x
-    
-    # AUDIT FIX: Use atan2 for smooth, differentiable wrapping
-    # atan2(sin(x), cos(x)) naturally wraps to [-π, π]
+
     x_wrapped = torch.atan2(torch.sin(x), torch.cos(x))
-    
+    two_pi = 2.0 * torch.pi
+    x_wrapped = torch.where(x_wrapped < 0, x_wrapped + two_pi, x_wrapped)
     return x_wrapped
 
 
@@ -90,8 +89,8 @@ class LeapfrogIntegrator(nn.Module):
     For use with LowRankChristoffel and ReactiveChristoffel geometries.
     
     PRODUCTION FIX (2026-02-07):
-    - Uses updated FRICTION_SCALE=0.05
-    - Uses EPSILON_STANDARD=1e-8
+    - Uses updated FRICTION_SCALE=0.02
+    - Uses EPSILON_STANDARD=1e-7
     - Supports smooth boundary wrapping
     """
     def __init__(self, christoffel, dt=None):
@@ -166,7 +165,7 @@ class LeapfrogIntegrator(nn.Module):
                     gate = torch.matmul(feat, Wf.t()) + bf
                     mu = torch.sigmoid(gate) * FRICTION_SCALE  # PRODUCTION: Use updated constant
 
-                # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-8
+                # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-7
                 # v_half = (curr_v + h*(F - Gamma)) / (1 + h*mu + eps)
                 v_half = (curr_v + h * (force - gamma)) / (1.0 + h * mu + EPSILON_STANDARD)
                 
@@ -194,7 +193,7 @@ class LeapfrogIntegrator(nn.Module):
                     gate = torch.matmul(feat, Wf.t()) + bf
                     mu_half = torch.sigmoid(gate) * FRICTION_SCALE  # PRODUCTION: Use updated constant
                     
-                # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-8
+                # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-7
                 curr_v = (v_half + h * (force - gamma_half)) / (1.0 + h * mu_half + EPSILON_STANDARD)
         finally:
             self.christoffel.return_friction_separately = was_separate

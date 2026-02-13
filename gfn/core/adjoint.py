@@ -53,7 +53,7 @@ class GeodesicODEFunc(nn.Module):
         dx_dt = v
         
         # dv/dt = f - Γ(v, x)
-        dv_dt = f - self.christoffel(v, x)
+        dv_dt = f - self.christoffel(v, x, force=f)
         
         # df/dt = 0
         df_dt = torch.zeros_like(f)
@@ -77,7 +77,44 @@ class AdjointMLayer(nn.Module):
         self.ode_func = GeodesicODEFunc(self.christoffel)
         
         self.integration_time = integration_time
-        # ... (rest of init)
+        self.n_steps = n_steps
+        
+    def forward(self, x, v, force):
+        # State: [x, v, f]
+        state = torch.cat([x, v, force], dim=-1)
+        
+        if HAS_TORCHDIFFEQ:
+            # Use torchdiffeq for O(1) adjoint backprop
+            t = torch.tensor([0.0, float(self.integration_time)], device=x.device)
+            
+            # odeint_adjoint if training, else odeint
+            solver = odeint_adjoint if self.training else odeint
+            
+            # Integrate
+            # Note: odeint returns tensor of shape [time_steps, batch, dim]
+            out = solver(self.ode_func, state, t, method='rk4')
+            final_state = out[-1]
+        else:
+            # Manual RK4 fallback (O(N) memory but works without deps)
+            dt = self.integration_time / self.n_steps
+            curr_state = state
+            
+            for _ in range(self.n_steps):
+                k1 = self.ode_func(0, curr_state)
+                k2 = self.ode_func(0, curr_state + 0.5 * dt * k1)
+                k3 = self.ode_func(0, curr_state + 0.5 * dt * k2)
+                k4 = self.ode_func(0, curr_state + dt * k3)
+                curr_state = curr_state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+            
+            final_state = curr_state
+            
+        # Extract x, v
+        dim = self.christoffel.dim
+        x_out = final_state[..., :dim]
+        v_out = final_state[..., dim:2*dim]
+        
+        # Return signature matching MLayer: x, v, context, christoffels
+        return x_out, v_out, None, []
 
 class AdjointManifold(nn.Module):
     """
@@ -182,6 +219,8 @@ class AdjointManifold(nn.Module):
             mask = torch.ones(batch_size, seq_len, 1, device=input_ids.device)
         
         logits_list = []
+        x_seq = []
+        v_seq = []
         
         for t in range(seq_len):
             force = all_forces[:, t] * mask[:, t]
@@ -193,12 +232,20 @@ class AdjointManifold(nn.Module):
                 
                 x, v, _, _ = layer(x, v, force)
             
+            x_seq.append(x)
+            v_seq.append(v)
+            
             out = self.readout_norm(x)
             logit = self.readout(out)
             logits_list.append(logit.unsqueeze(1))
         
         logits = torch.cat(logits_list, dim=1)
-        return logits, (x, v)
+        x_seq_tensor = torch.stack(x_seq, dim=1)
+        v_seq_tensor = torch.stack(v_seq, dim=1)
+        
+        # Match Manifold.forward signature:
+        # logits, (x, v), all_christoffels, v_seq, x_seq, all_forces
+        return logits, (x, v), [], v_seq_tensor, x_seq_tensor, all_forces
 
     def generate(self, prompt_ids, max_new_tokens=50, temperature=1.0, top_k=None, top_p=None):
         """

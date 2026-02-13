@@ -30,6 +30,7 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
     Topology topology,
     scalar_t R,
     scalar_t r,
+    scalar_t velocity_friction_scale, // Added
     // Outputs (atomicAdd for parameters)
     scalar_t* __restrict__ grad_v,              // [batch, dim]
     scalar_t* __restrict__ grad_U,              // [dim, rank]
@@ -45,15 +46,17 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
     if (b >= batch_size) return;
 
     const scalar_t* grad_out_b = grad_out + b * dim;
-    const scalar_t* output_b = output + b * dim;
     const scalar_t* v_b = v + b * dim;
     const scalar_t* x_b = x + b * dim;
     const scalar_t* force_b = (force != nullptr) ? (force + b * dim) : nullptr;
     
+    scalar_t gamma_b[64];
+    christoffel_device(v_b, U, W, x_b, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_b);
+
     // Soft Tanh correction
     scalar_t grad_pre[64]; // Max dim 64 recommended for this kernel
     for(int i = 0; i < dim && i < 64; ++i) {
-        scalar_t t = output_b[i] / CURVATURE_CLAMP;
+        scalar_t t = gamma_b[i] / CURVATURE_CLAMP;
         grad_pre[i] = grad_out_b[i] * (1.0f - t * t);
     }
 
@@ -64,10 +67,10 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
     
     for(int i = 0; i < dim; ++i) { g_v_b[i] = 0; g_x_b[i] = 0; if(g_f_b) g_f_b[i] = 0; }
 
-    // 1. Friction contribution dL/dmu_i = grad_pre[i] * v_b[i]
+    // 1. Friction contribution dL/dmu_i = grad_out[i] * v_b[i]
     scalar_t grad_mu[64];
     for(int i = 0; i < dim && i < 64; ++i) {
-        grad_mu[i] = grad_pre[i] * v_b[i];
+        grad_mu[i] = grad_out_b[i] * v_b[i];
     }
     
     // BACKWARD FRICTION (Local to parameter gradients handled via atomicAdd)
@@ -75,6 +78,13 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
     scalar_t features[128];
     if (topology == Topology::TORUS) compute_fourier_features(features, x_b, dim);
     else vector_copy(features, x_b, dim);
+    
+    // Calculate v_norm for friction scaling backward
+    scalar_t v_norm = 0.0f;
+    if (velocity_friction_scale > 0.0f) {
+        for(int i=0; i<dim; ++i) v_norm += v_b[i] * v_b[i];
+        v_norm = sqrtf(v_norm);
+    }
     
     for (int i = 0; i < dim; ++i) {
         scalar_t z = b_forget[i];
@@ -84,7 +94,19 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
         }
         
         scalar_t s = sigmoid(z);
-        scalar_t dz = grad_mu[i] * FRICTION_SCALE * s * (1.0f - s);
+        // Base friction without velocity scaling
+        scalar_t mu_base = s * FRICTION_SCALE;
+        
+        // Adjust gradient for mu based on velocity scaling
+        // If velocity scaling is active, mu = mu_base * (1 + scale * |v|)
+        // dL/dmu_base = dL/dmu * (1 + scale * |v|)
+        scalar_t dL_dmu_base = grad_mu[i];
+        if (velocity_friction_scale > 0.0f) {
+             scalar_t scale_factor = 1.0f + velocity_friction_scale * v_norm / (sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
+             dL_dmu_base *= scale_factor;
+        }
+        
+        scalar_t dz = dL_dmu_base * FRICTION_SCALE * s * (1.0f - s);
         
         atomicAdd(&grad_bf[i], dz);
         for (int j = 0; j < feat_dim; ++j) atomicAdd(&grad_Wf[i * feat_dim + j], dz * features[j]);
@@ -107,9 +129,6 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
     }
     
     // BACKWARD CHRISTOFFEL
-    scalar_t gamma_b[64], gv_l[64], gx_l[64];
-    christoffel_device(v_b, U, W, x_b, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_b);
-    
     // Temporary locals for U, W gradients to use atomicAdd
     scalar_t h[64], grad_h[64], grad_q[64];
     scalar_t h_energy = 0.0f;
@@ -119,14 +138,18 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
         h[i] = sum;
         h_energy += sum * sum;
     }
+    if (rank > 0) {
+        h_energy /= static_cast<scalar_t>(rank);
+    }
     scalar_t norm = sqrtf(h_energy);
-    scalar_t S = 1.0f / (1.0f + norm + 1e-4f);
+    scalar_t S = 1.0f / (1.0f + norm + EPSILON_STANDARD);
     
     scalar_t M_plas = 1.0f;
     if (plasticity != 0.0f) {
         scalar_t v_e = 0.0f;
         for (int i = 0; i < dim; ++i) v_e += v_b[i] * v_b[i];
-        M_plas = (1.0f + plasticity * tanhf(v_e / dim));
+        v_e /= static_cast<scalar_t>(dim);
+        M_plas = (1.0f + plasticity * 0.1f * tanhf(v_e));
     }
     
     scalar_t M_sing = 1.0f;
@@ -135,7 +158,7 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
         if (topology == Topology::TORUS) { for (int i = 0; i < dim; ++i) pot += sinf(x_b[i]) * V_w[i]; }
         else { for (int i = 0; i < dim; ++i) pot += x_b[i] * V_w[i]; }
         gate = sigmoid(pot);
-        soft_m = sigmoid(10.0f * (gate - sing_thresh));
+        soft_m = sigmoid(SINGULARITY_GATE_SLOPE * (gate - sing_thresh));
         M_sing = (1.0f + (sing_strength - 1.0f) * soft_m);
     }
     scalar_t M = M_plas * M_sing;
@@ -163,21 +186,47 @@ __global__ void lowrank_christoffel_friction_backward_kernel(
 
     // Mu contribution to grad_v
     scalar_t mu_b[64];
-    compute_friction(x_b, force_b, W_forget, b_forget, W_input, dim, topology, mu_b);
-    for(int i = 0; i < dim; ++i) g_v_b[i] += mu_b[i] * grad_pre[i];
-
-    // Singularity gradient for x and V_w
-    if (x_b != nullptr && V_w != nullptr) {
-        scalar_t dL_dM_sing = sum_grad_q_h_sq * S * M_plas;
-        scalar_t dM_dsoft = (sing_strength - 1.0f);
-        scalar_t dsoft_dgate = 10.0f * soft_m * (1.0f - soft_m);
-        scalar_t dgate_dpot = gate * (1.0f - gate);
-        scalar_t factor = dL_dM_sing * dM_dsoft * dsoft_dgate * dgate_dpot;
+    compute_friction(x_b, force_b, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, v_norm, mu_b);
+    for(int i = 0; i < dim; ++i) g_v_b[i] += mu_b[i] * grad_out_b[i];
+    
+    // Add gradient from velocity scaling of friction: d(mu)/dv
+    if (velocity_friction_scale > 0.0f && v_norm > 1e-8f) {
+        scalar_t v_scale_grad_factor = velocity_friction_scale / (sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
+        for(int i=0; i<dim; ++i) {
+            // mu[i] = mu_base[i] * (1 + scale * |v|)
+            // d(mu[i])/dv[j] = mu_base[i] * scale * v[j]/|v|
+            // contribution to g_v_b[j] is sum_i (grad_out_b[i] * v_b[i]) * d(mu[i])/dv[j] ... wait
+            // The term is F_fric = mu * v
+            // d(F_fric[i])/dv[j] (for i!=j) = v[i] * d(mu[i])/dv[j]
+            // d(F_fric[i])/dv[i] = mu[i] + v[i] * d(mu[i])/dv[i]
+            // We already added mu[i] * grad_out_b[i] (this is the first term)
+            // Now we need sum_k (grad_out_b[k] * v_b[k]) * d(mu[k])/dv[j]
+            // d(mu[k])/dv[j] = mu_base[k] * scale * v[j] / |v|
+            // So we need sum_k (grad_out_b[k] * v_b[k] * mu_base[k]) * (scale * v[j] / |v|)
+            
+            // Recompute mu_base[i] (we didn't store it)
+            // Or reuse mu_b[i] which is mu_base * (1+...)
+            // mu_base[i] = mu_b[i] / (1 + scale * |v|)
+            
+            scalar_t scale_term = 1.0f + v_scale_grad_factor * v_norm;
+            scalar_t mu_base_i = mu_b[i] / scale_term;
+            
+            // The sum is over k. Wait, this loop is over i.
+            // I need to accumulate the common factor first.
+            // common_factor = sum_k (grad_out_b[k] * v_b[k] * mu_base[k])
+            // This needs a separate loop.
+        }
         
-        for (int i = 0; i < dim; ++i) {
-            scalar_t dpot_dxi = (topology == Topology::TORUS) ? cosf(x_b[i]) * V_w[i] : V_w[i];
-            g_x_b[i] += factor * dpot_dxi;
-            atomicAdd(&grad_Vw[i], factor * ((topology == Topology::TORUS) ? sinf(x_b[i]) : x_b[i]));
+        scalar_t common_sum = 0.0f;
+        scalar_t scale_term = 1.0f + v_scale_grad_factor * v_norm;
+        for(int k=0; k<dim; ++k) {
+            scalar_t mu_base_k = mu_b[k] / scale_term;
+            common_sum += grad_out_b[k] * v_b[k] * mu_base_k;
+        }
+        
+        scalar_t factor = common_sum * v_scale_grad_factor / v_norm;
+        for(int j=0; j<dim; ++j) {
+            g_v_b[j] += factor * v_b[j];
         }
     }
 }
@@ -204,7 +253,8 @@ std::vector<torch::Tensor> lowrank_christoffel_friction_backward_cuda(
     double sing_strength,
     int topology,
     double R,
-    double r
+    double r,
+    double velocity_friction_scale
 ) {
     const int batch_size = v.size(0);
     const int dim = v.size(1);
@@ -245,6 +295,7 @@ std::vector<torch::Tensor> lowrank_christoffel_friction_backward_cuda(
         static_cast<Topology>(topology),
         static_cast<scalar_t>(R),
         static_cast<scalar_t>(r),
+        static_cast<scalar_t>(velocity_friction_scale),
         grad_v.data_ptr<scalar_t>(),
         grad_U.data_ptr<scalar_t>(),
         grad_W.data_ptr<scalar_t>(),

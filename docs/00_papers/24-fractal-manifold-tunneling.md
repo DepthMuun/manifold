@@ -70,11 +70,13 @@ The fractal geodesic flow consists of two components:
 1. **Macro evolution**: Standard geodesic flow on $\mathcal{M}$
 2. **Micro evolution**: Refined geodesic flow on $\mathcal{M}_\epsilon$, invoked when curvature exceeds a threshold
 
-The complete state evolution is:
+The complete state evolution blends macro and micro outputs:
 
-$$x_{\text{final}} = x_{\text{macro}} + \alpha(x_{\text{micro}} - x_{\text{macro}})$$
+$$x_{\text{final}} = (1 - \alpha) \, x_{\text{macro}} + \alpha \, x_{\text{micro}}$$
 
 where $\alpha \in [0,1]$ is the tunnel gate controlling the contribution of the micro-manifold.
+
+> **Remark (Symplecticity).** The linear blending above is an affine interpolation in the ambient space, which does **not** preserve the symplectic structure of the phase space $(x, v)$. A geometrically rigorous alternative would use geodesic interpolation on the manifold: $x_{\text{final}} = \exp_{x_{\text{macro}}}\left(\alpha \cdot \exp^{-1}_{x_{\text{macro}}}(x_{\text{micro}})\right)$, which traces the geodesic from $x_{\text{macro}}$ toward $x_{\text{micro}}$ by a fraction $\alpha$. The linear blending is used as a practical approximation that avoids the computational cost of logarithmic map evaluation while still providing smooth, differentiable interpolation between the two resolution levels.
 
 ### 3.2 Macro-Manifold
 
@@ -90,7 +92,15 @@ The tunnel gate $\alpha$ is computed based on the estimated local curvature. We 
 
 $$R = \|\Gamma\| = \sqrt{\sum_i \|\Gamma_i\|_F^2}$$
 
-where $\Gamma_i$ are the Christoffel symbols for each attention head. The tunnel gate is:
+where $\Gamma_i$ are the Christoffel symbols for each attention head.
+
+> **Remark (Coordinate Dependence).** The Frobenius norm $\|\Gamma\|_F$ is a coordinate-dependent quantity: the same manifold with the same curvature yields different Frobenius norms in different coordinate systems, because Christoffel symbols are not tensors (they transform with an inhomogeneous term under coordinate changes). A more intrinsic curvature proxy is the **geodesic acceleration norm**:
+>
+> $$\kappa_{\text{geo}}(x, v) = \left\| \Gamma^k_{ij}(x) v^i v^j \right\|_g = \sqrt{g_{kl}(x) \, \Gamma^k_{ij}(x) v^i v^j \, \Gamma^l_{mn}(x) v^m v^n}$$
+>
+> which measures the magnitude of the geodesic deviation in the metric and is invariant under coordinate transformations. In practice, the Frobenius norm is used as a computationally cheaper proxy, and its coordinate dependence is mitigated by the fact that the learned coordinates are fixed once training converges.
+
+The tunnel gate is:
 
 $$\alpha = \sigma((R - \theta) \cdot \kappa)$$
 
@@ -98,9 +108,9 @@ where $\sigma$ is the sigmoid function, $\theta$ is a curvature threshold, and $
 
 ### 3.5 Theoretical Analysis
 
-**Proposition 1 (Curvature Detection)**: The Christoffel norm $R$ is an increasing function of the manifold's sectional curvature in the direction of velocity $v$.
+**Proposition 1 (Curvature Correlation)**: The Christoffel norm $R$ is positively correlated with the manifold's sectional curvature in the direction of velocity $v$, though the relationship is not strictly monotone due to coordinate dependence.
 
-*Proof*: The Christoffel symbols encode the Levi-Civita connection, which depends on the metric's second derivatives. Regions of high sectional curvature require rapid variation of the connection, leading to larger Christoffel symbol magnitudes. ∎
+*Proof*: The Christoffel symbols encode the Levi-Civita connection, which depends on the metric's first derivatives. The Riemann curvature tensor depends on both the Christoffel symbols and their derivatives: $R^l_{\;kij} = \partial_i \Gamma^l_{jk} - \partial_j \Gamma^l_{ik} + \Gamma^l_{im}\Gamma^m_{jk} - \Gamma^l_{jm}\Gamma^m_{ik}$. While there is no strict monotone relationship between $\|\Gamma\|$ and sectional curvature (since the Christoffel symbols themselves are not tensorial), empirically, regions of large $\|\Gamma\|$ coincide with regions of large curvature in the learned coordinate system. ∎
 
 **Proposition 2 (Resolution Hierarchy)**: The micro-manifold provides higher resolution than the macro-manifold in proportion to the ratio of their time steps.
 
@@ -206,11 +216,13 @@ Fractal Manifold Tunneling represents a step toward more efficient geometric dee
 
 ## Appendix A: Fractal Dimension Analysis
 
-The fractal dimension of the FMT trajectory space can be estimated using the box-counting method. For a trajectory with tunneling rate $p$, the effective dimension is:
+The fractal dimension of the FMT trajectory space can be estimated using the box-counting method. For a trajectory with tunneling rate $p$, we define an **effective dimensionality heuristic**:
 
-$$D_f = D_{\text{macro}} + (D_{\text{micro}} - D_{\text{macro}}) \cdot p$$
+$$D_{\text{eff}} = D_{\text{macro}} + (D_{\text{micro}} - D_{\text{macro}}) \cdot p$$
 
 where $D_{\text{macro}}$ and $D_{\text{micro}}$ are the intrinsic dimensions of the macro and micro manifold representations.
+
+> **Remark.** The quantity $D_{\text{eff}}$ is a linear interpolation between the macro and micro dimensions, not a proper fractal (Hausdorff) dimension. A true Hausdorff dimension is defined as $D_H = \lim_{\epsilon \to 0} \frac{\log N(\epsilon)}{-\log \epsilon}$ where $N(\epsilon)$ is the minimum number of $\epsilon$-balls needed to cover the set, and generally takes non-integer values for self-similar structures. The heuristic $D_{\text{eff}}$ should be interpreted as the average representational capacity of the trajectory, weighted by the fraction of time spent in each resolution regime. It provides a useful summary statistic for comparing FMT configurations, but does not carry the rigorous mathematical properties of a true fractal dimension.
 
 ---
 

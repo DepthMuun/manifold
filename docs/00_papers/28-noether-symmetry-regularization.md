@@ -36,6 +36,8 @@ The contributions of this work are as follows. First, we establish the connectio
 
 Noether's theorem, proven by Emmy Noether in 1915, states that every differentiable symmetry of the action of a physical system corresponds to a conservation law. For a system with Lagrangian $\mathcal{L}(q, \dot{q})$, if the action is invariant under a continuous transformation $q \mapsto q'$, then there exists a conserved quantity (Noether charge).
 
+> **Important Distinction.** Noether's theorem applies to **continuous** (Lie group) symmetries, such as translation, rotation, and gauge symmetries. The permutation group $S_k$ used for isomeric heads is a **discrete** group. Therefore, the connection to Noether's theorem is an *analogy* rather than a direct application. The discrete analogue of Noether charges are **Ward identities** from quantum field theory, which relate symmetries of the action to constraints on correlation functions. Our use of the term "Noether" is inspired by the conceptual parallels: both frameworks connect symmetries to conserved or constrained quantities.
+
 In the context of machine learning, symmetries manifest as invariances or equivariances of the function being learned. For example, a convolutional network's translation symmetry means that shifting the input shifts the output by the same amount.
 
 ### 2.2 Symmetry in Deep Learning
@@ -83,23 +85,31 @@ $$\Gamma_{h_i}(v) = \Gamma_{h_{\sigma(i)}}(v)$$
 
 for all permutations $\sigma \in \mathcal{S}_k$.
 
-### 3.2 Noether Charge
+### 3.2 Symmetry Discrepancy
 
-In Noether's framework, a continuous symmetry implies a conserved quantity (Noether charge). For the permutation symmetry of isomeric heads, we can define a charge associated with each head relative to a reference head.
+Inspired by Noether's framework, where a continuous symmetry implies a conserved charge, we define a **symmetry discrepancy** associated with each head relative to a reference. For the discrete permutation symmetry of isomeric heads, we measure the departure from perfect symmetry.
 
-Let $\Gamma_{\text{ref}}(v)$ be the Christoffel output of a reference head. For head $h_i$, the Noether charge is:
+Let $\Gamma_{\text{ref}}(v)$ be the Christoffel output of a reference head (e.g., the group mean). For head $h_i$, the symmetry discrepancy is:
 
-$$Q_i(v) = \Gamma_{h_i}(v) - \Gamma_{\text{ref}}(v)$$
+$$D_i(v) = \Gamma_{h_i}(v) - \Gamma_{\text{ref}}(v)$$
 
-In a perfectly symmetric system, all charges are zero: $Q_i(v) = 0$ for all $i$.
+In a perfectly symmetric system, all discrepancies are zero: $D_i(v) = 0$ for all $i$.
+
+> **Remark.** We use the term "symmetry discrepancy" rather than "Noether charge" to avoid implying a direct application of Noether's theorem to a discrete symmetry group. The quantity $D_i$ measures the degree of symmetry breaking, analogous to how non-zero Noether charges indicate broken continuous symmetries.
 
 ### 3.3 Symmetry Loss
 
-The Noether symmetry loss penalizes non-zero Noether charges. For a group of isomeric heads, we compute the mean squared difference between head outputs:
+The symmetry regularization loss penalizes non-zero symmetry discrepancies. For a group of isomeric heads, we compute the mean squared difference between head outputs:
 
 $$\mathcal{L}_{\text{NSR}} = \frac{1}{|\mathcal{G}|} \sum_{g \in \mathcal{G}} \frac{1}{|g|} \sum_{i,j \in g} \mathbb{E}_v \left[ \|\Gamma_i(v) - \Gamma_j(v)\|^2 \right]$$
 
 where $\mathcal{G}$ is the set of isomeric groups, $g$ is a single group, and $\mathbb{E}_v$ denotes expectation over the velocity distribution.
+
+> **Remark (Metric-Aware Loss).** The Euclidean MSE $\|\Gamma_i - \Gamma_j\|^2$ is not coordinate-invariant. A geometrically rigorous alternative would use the manifold metric to measure the difference:
+>
+> $$\mathcal{L}_{\text{NSR}}^{\text{Riem}} = g_{kl}(x)(\Gamma_i^k(v) - \Gamma_j^k(v))(\Gamma_i^l(v) - \Gamma_j^l(v))$$
+>
+> This metric-weighted loss is invariant under coordinate changes and measures the "physical" difference between the geometric quantities. However, since the Christoffel symbols are not tensors (they transforms with an inhomogeneous term), even the metric-weighted norm is not fully intrinsic. In practice, the Euclidean MSE is used as a computationally efficient proxy, and the coordinate dependence is mitigated by the fixed learned coordinate system.
 
 For efficiency, we implement a simpler pairwise loss:
 
@@ -109,7 +119,7 @@ where $\lambda_n$ is the regularization coefficient and pairs are taken within i
 
 ### 3.4 Symmetry Regularization Computation
 
-The NSR loss is computed from the Christoffel outputs of each head within their isomeric groups. For each group containing multiple heads, we select a reference head and compute the squared differences between its outputs and the outputs of all other heads in the group. These differences are averaged and scaled by the regularization coefficient to produce the final loss term. This computation is performed efficiently during the forward pass, using the already-computed Christoffel symbols from each head.
+The NSR loss is computed from the Christoffel outputs of each head within their isomeric groups. For each group containing multiple heads, we compute the group mean Christoffel output $\bar{\Gamma}_g = \frac{1}{|g|}\sum_{i \in g} \Gamma_i$ and then penalize the squared deviation of each head from this mean. This computation is performed efficiently during the forward pass, using the already-computed Christoffel symbols from each head.
 
 ### 3.5 Theoretical Analysis
 
@@ -117,9 +127,9 @@ The NSR loss is computed from the Christoffel outputs of each head within their 
 
 *Proof*: $\mathcal{L}_{\text{NSR}}$ is the mean squared difference between head outputs. Minimizing this quantity drives the differences to zero, i.e., $\Gamma_i(v) = \Gamma_j(v)$ for all $i, j$ in the same isomeric group. ∎
 
-**Proposition 2 (Noether Charge Conservation)**: At the minimum of $\mathcal{L}_{\text{NSR}}$, all Noether charges are zero.
+**Proposition 2 (Symmetry Discrepancy Vanishing)**: At the minimum of $\mathcal{L}_{\text{NSR}}$, all symmetry discrepancies are zero.
 
-*Proof*: Noether charges are defined as differences between head outputs. At the minimum, all differences are zero, so all charges vanish. ∎
+*Proof*: Symmetry discrepancies are defined as differences between head outputs. At the minimum, all differences are zero, so all discrepancies vanish. ∎
 
 **Proposition 3 (Generalization Improvement)**: Enforcing symmetry through NSR reduces the effective hypothesis space, improving generalization.
 
@@ -180,7 +190,7 @@ Pairs with $\lambda_n = 0.01$ provides the best balance of accuracy and symmetry
 
 ### 5.1 Connection to Noether's Theorem
 
-The name "Noether Symmetry Regularization" reflects the connection to Noether's theorem. The permutation symmetry of isomeric heads is a continuous symmetry in the sense that it can be continuously deformed. The regularization enforces this symmetry, corresponding to conserving the Noether charges (differences between head outputs).
+The name "Noether Symmetry Regularization" reflects the *analogy* to Noether's theorem. While the permutation symmetry of isomeric heads is a discrete symmetry (strictly outside Noether's domain, which requires continuous Lie group symmetries), the conceptual framework is the same: symmetries constrain the system's behavior, and measuring the degree of symmetry violation provides a useful regularization signal. The discrete analogue of Noether's conserved charges—what we call symmetry discrepancies—plays the same role as Ward identities in quantum field theory, imposing constraints on correlation functions (here, correlations between head outputs).
 
 ### 5.2 Hard Tying vs. Soft Regularization
 
@@ -224,13 +234,18 @@ Noether Symmetry Regularization represents a step toward more principled symmetr
 
 Beyond permutation symmetry, NSR can be applied to other symmetry groups:
 
-**Scaling symmetry**: All heads should have scaled versions of the same weights
-$$\Gamma_i(v) = s_i \cdot \Gamma_{\text{ref}}(s_i^{-1} v)$$
+**Scaling symmetry**: All heads should produce outputs related by a known scaling. Due to the quadratic nature of the Christoffel contraction, scaling the velocity by $s$ scales the output by $s^2$:
+$$\Gamma^k_{ij}(sv)^i(sv)^j = s^2 \, \Gamma^k_{ij} v^i v^j$$
 
-**Rotation symmetry**: Heads related by rotation should produce rotated outputs
-$$\Gamma_i(R v) = R \Gamma_{\text{ref}}(v)$$
+Therefore, the correct scaling symmetry for isomeric heads is:
+$$\Gamma_i(s_i v) = s_i^2 \cdot \Gamma_{\text{ref}}(v)$$
 
-The NSR loss can be adapted to these cases by incorporating the appropriate transformation.
+This quadratic scaling is a consequence of the bilinear (rank-2 covariant) nature of the Christoffel contraction in velocity.
+
+**Rotation symmetry**: Heads related by rotation should produce equivariantly rotated outputs (the Christoffel contraction transforms as a contravariant vector under rotations):
+$$\Gamma_i^k(R v) = R^k_{\;l} \, \Gamma_{\text{ref}}^l(v)$$
+
+where $R$ is a rotation matrix. The NSR loss can be adapted to these cases by incorporating the appropriate transformation into the discrepancy computation.
 
 ---
 

@@ -71,7 +71,8 @@ __global__ void lowrank_christoffel_friction_kernel(
     scalar_t sing_strength,
     int topology_id,
     scalar_t R,
-    scalar_t r
+    scalar_t r,
+    scalar_t velocity_friction_scale // Added
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -92,6 +93,7 @@ __global__ void lowrank_christoffel_friction_kernel(
         dim, rank,
         plasticity, sing_thresh, sing_strength,
         topology, R, r,
+        velocity_friction_scale,
         output_ptr
     );
 }
@@ -184,7 +186,8 @@ torch::Tensor lowrank_christoffel_with_friction(
     float sing_strength,
     int topology,
     float R,
-    float r
+    float r,
+    float velocity_friction_scale
 ) {
     TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
@@ -224,7 +227,8 @@ torch::Tensor lowrank_christoffel_with_friction(
         sing_strength,
         topology,
         R,
-        r
+        r,
+        velocity_friction_scale
     );
     
     // Check for errors

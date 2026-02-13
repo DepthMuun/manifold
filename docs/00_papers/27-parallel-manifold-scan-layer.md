@@ -105,27 +105,41 @@ This is fundamentally different from Christoffel-based dynamics but achieves sim
 
 ### 3.2 Predicting Linearization Parameters
 
-The decay factor $A_t$ is predicted using a sigmoid activation to ensure values in $[0, 1]$:
+The decay factor $A_t$ is predicted from both the current position $x_t$ and the input force $F_t$, since geometric damping depends on the local curvature (encoded in $x_t$) as well as the applied force:
 
-$$A_t = \sigma(W_A F_t + b_A)$$
+$$A_t = \sigma(W_A [x_t; F_t] + b_A)$$
 
-Values close to 1 indicate strong velocity persistence (weak decay), while values close to 0 indicate strong damping.
+where $[x_t; F_t]$ denotes concatenation. Values close to 1 indicate strong velocity persistence (weak decay), while values close to 0 indicate strong damping.
 
-The input modulation $B_t$ is predicted linearly:
+> **Remark.** Using $F_t$ alone to predict $A_t$ (as in a pure input-driven system) ignores the position-dependent curvature information. On a manifold, the damping of velocity depends on the local Christoffel symbols $\Gamma^k_{ij}(x)$, which are functions of position. Including $x_t$ in the prediction allows the network to learn position-dependent decay that approximates the true curvature-dependent behavior.
 
-$$B_t = W_B F_t + b_B$$
+The input modulation $B_t$ is similarly predicted from both position and force:
 
-This represents the forcing term's effect on velocity.
+$$B_t = W_B [x_t; F_t] + b_B$$
+
+This represents the forcing term's effect on velocity, modulated by the local geometry.
 
 ### 3.3 Time Scale Modulation
 
-To capture both short-range and long-range dependencies, we introduce multi-scale time initialization. Different heads operate at different base time scales, where the head at index $i$ has base time scale $s_i$. A common choice uses an exponential progression $s_i = 1.5^i$ for head $i$.
+To capture both short-range and long-range dependencies, we introduce multi-scale time initialization. Different heads operate at different base time scales, where the head at index $i$ has base time scale $s_i$. We use a geometric progression $s_i = \beta^i$ for head $i$, where $\beta > 1$ is a base factor.
+
+The default $\beta = 1.5$ is chosen so that across $h$ heads, the ratio of the slowest to fastest time scale is $\beta^{h-1}$. For $h = 8$ heads, this gives a ratio of $\approx 17\times$, covering roughly one order of magnitude. The value $\beta = 1.5$ provides a good balance: larger values (e.g., 2.0) spread the scales too aggressively and leave gaps, while smaller values (e.g., 1.2) provide insufficient range. The base factor $\beta$ is treated as a tunable hyperparameter in our implementation.
 
 This creates an effective "wormhole" structure where fast heads capture rapid dynamics and slow heads capture gradual trends. The final time step is modulated by both the learned timestep and the base scale:
 
 $$\Delta t_t = \Delta t_{\text{learned}} \cdot \Delta t_{\text{base}}$$
 
-### 3.4 Parallel Scan Computation
+### 3.4 Limitations of Linearization
+
+The LTV approximation introduces a linearization error of order $\mathcal{O}(\|v - v_0\|^2)$, where $v_0$ is the linearization point. Specifically, the true quadratic Christoffel dynamics produce:
+
+$$\Gamma^k_{ij} v^i v^j = \Gamma^k_{ij} v_0^i v_0^j + 2\Gamma^k_{ij} v_0^i (v^j - v_0^j) + \Gamma^k_{ij}(v^i - v_0^i)(v^j - v_0^j)$$
+
+The linear approximation retains only the first two terms, discarding the quadratic remainder. This remainder is negligible when $\|v - v_0\| \ll \|v_0\|$, which is typically satisfied for small time steps or when the force $F_t$ does not cause large velocity jumps.
+
+> **When the approximation breaks down:** In regions of very high curvature where $\|\Gamma\|$ is large, even small velocity perturbations can produce significant quadratic terms. In practice, the learned $A_t$ and $B_t$ compensate for this by absorbing some of the non-linear behavior into the parameterization. Nevertheless, the P-MLayer should be understood as a computational approximation to true geodesic dynamics, not an exact parallelization.
+
+### 3.5 Parallel Scan Computation
 
 Given sequences $\{A_t\}$ and $\{B_t\}$, the velocity sequence is computed using the parallel scan algorithm. The algorithm works by computing local prefix products of $A_t$ and weighted sums of $B_t$ using the prefix products, combining results across logarithmic levels.
 
@@ -133,7 +147,7 @@ The position sequence is similarly computed through a parallel scan, integrating
 
 $$x_t = x_{t-1} + v_t \cdot \Delta t$$
 
-### 3.5 Theoretical Analysis
+### 3.6 Theoretical Analysis
 
 **Proposition 1 (LTV Approximation)**: The linearized dynamics $\dot{v} = -D(F)v + F$ approximate the non-linear Christoffel dynamics $\dot{v}^k = -\Gamma^k_{ij}(x) v^i v^j$ to first order.
 
@@ -267,12 +281,14 @@ Starting from the Christoffel equation:
 
 $$\frac{dv}{dt} = -\Gamma(v, v) = -U W^T (v \odot v)$$
 
+where $\Gamma(v, v)$ is a shorthand for the Christoffel contraction $\Gamma^k_{ij} v^i v^j$, approximated by the low-rank form $U W^T (v \odot v)$.
+
 We linearize around $v_0$:
 
-$$U W^T (v \odot v) \approx U W^T (v_0 \odot v_0) + J(v_0) \cdot (v - v_0)$$
+$$U W^T (v \odot v) \approx U W^T (v_0 \odot v_0) + J(v_0) \cdot (v - v_0) + \mathcal{O}(\|v - v_0\|^2)$$
 
-where $J$ is the Jacobian. Setting $F = -(U W^T (v_0 \odot v_0) - J(v_0) \cdot v_0)$ and $D = J$ gives:
+where $J$ is the Jacobian $J^k_j(v_0) = 2 U^k_a W^a_j v_0^j$ (using the symmetry of the quadratic form). Setting $F = -(U W^T (v_0 \odot v_0) - J(v_0) \cdot v_0)$ and $D = J$ gives:
 
 $$\frac{dv}{dt} = -D \cdot v + F$$
 
-This is the LTV form used in P-MLayer.
+This is the LTV form used in P-MLayer. The discarded quadratic remainder $\mathcal{O}(\|v - v_0\|^2)$ is the source of the linearization error discussed in §3.4.

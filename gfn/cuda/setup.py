@@ -19,7 +19,7 @@ cuda_sources = [
     # Integrator kernels - Runge-Kutta
     'src/integrators/runge_kutta/heun_fused.cu',
     'src/integrators/runge_kutta/heun_backward.cu',
-    'src/integrators/recurrent_manifold_fused.cu',
+    'src/integrators/recurrent_manifold_fused.cpp',
 ]
 
 # Convert to absolute paths

@@ -143,6 +143,8 @@ GFN_DEVICE void christoffel_device(
  * @param W_input Input gate weights [dim x dim] (optional)
  * @param dim Dimension
  * @param topology Topology type
+ * @param velocity_friction_scale Velocity friction scaling factor
+ * @param v_norm_val Pre-computed velocity norm (optional, if available)
  * @param friction Output friction coefficients [dim]
  */
 GFN_DEVICE void compute_friction(
@@ -153,6 +155,8 @@ GFN_DEVICE void compute_friction(
     const scalar_t* W_input,
     int dim,
     Topology topology,
+    scalar_t velocity_friction_scale,
+    scalar_t v_norm_val,
     scalar_t* friction
 ) {
     scalar_t features[128]; // Max 2*dim for Fourier features
@@ -182,7 +186,16 @@ GFN_DEVICE void compute_friction(
             }
         }
         
-        friction[i] = sigmoid(gate_val) * FRICTION_SCALE;
+        scalar_t base_friction = sigmoid(gate_val) * FRICTION_SCALE;
+        
+        // Apply velocity scaling: mu = mu_base * (1 + scale * |v|)
+        if (velocity_friction_scale > 0.0f) {
+            // Normalized by sqrt(dim) to be dimension-agnostic
+            scalar_t v_scale = v_norm_val / (sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
+            friction[i] = base_friction * (1.0f + velocity_friction_scale * v_scale);
+        } else {
+            friction[i] = base_friction;
+        }
     }
 }
 
@@ -212,6 +225,7 @@ GFN_DEVICE void christoffel_with_friction(
     Topology topology,
     scalar_t R,
     scalar_t r,
+    scalar_t velocity_friction_scale,
     scalar_t* output
 ) {
     scalar_t gamma[64];
@@ -226,9 +240,16 @@ GFN_DEVICE void christoffel_with_friction(
     
     // Compute friction if position is available
     if (x != nullptr && W_forget != nullptr && b_forget != nullptr) {
+        // Calculate v_norm for friction scaling
+        scalar_t v_norm = 0.0f;
+        if (velocity_friction_scale > 0.0f) {
+            for(int i=0; i<dim; ++i) v_norm += v[i]*v[i];
+            v_norm = sqrtf(v_norm);
+        }
+
         compute_friction(
             x, force, W_forget, b_forget, W_input,
-            dim, topology, friction
+            dim, topology, velocity_friction_scale, v_norm, friction
         );
         
         // Add friction term: gamma + μ * v
@@ -267,6 +288,7 @@ GFN_DEVICE void christoffel_friction_separate(
     Topology topology,
     scalar_t R,
     scalar_t r,
+    scalar_t velocity_friction_scale,
     scalar_t* gamma,
     scalar_t* friction
 ) {
@@ -279,9 +301,16 @@ GFN_DEVICE void christoffel_friction_separate(
     
     // Compute friction if position is available
     if (x != nullptr && W_forget != nullptr && b_forget != nullptr) {
+        // Calculate v_norm for friction scaling
+        scalar_t v_norm = 0.0f;
+        if (velocity_friction_scale > 0.0f) {
+            for(int i=0; i<dim; ++i) v_norm += v[i]*v[i];
+            v_norm = sqrtf(v_norm);
+        }
+
         compute_friction(
             x, force, W_forget, b_forget, W_input,
-            dim, topology, friction
+            dim, topology, velocity_friction_scale, v_norm, friction
         );
     } else {
         // No friction
@@ -346,6 +375,9 @@ GFN_DEVICE void christoffel_backward_device(
         h[i] = sum;
         h_energy += sum * sum;
     }
+    if (rank > 0) {
+        h_energy /= static_cast<scalar_t>(rank);
+    }
     
     scalar_t norm = sqrt(h_energy);
     scalar_t S = 1.0f / (1.0f + norm + EPSILON_STANDARD);
@@ -356,7 +388,7 @@ GFN_DEVICE void christoffel_backward_device(
     if (plasticity != 0.0) {
         for (int i = 0; i < dim; ++i) v_energy += v[i] * v[i];
         v_energy /= static_cast<scalar_t>(dim);
-        M_plas = (1.0 + plasticity * tanh(v_energy));
+        M_plas = (1.0 + plasticity * 0.1 * tanh(v_energy));
     }
     
     scalar_t M_sing = 1.0;
@@ -417,8 +449,9 @@ GFN_DEVICE void christoffel_backward_device(
     if (plasticity != 0.0) {
         // dL/dM_plas = sum_i grad_q[i] * h[i]^2 * S * M_sing
         scalar_t dL_dM_plas = sum_grad_q_h_sq * S * M_sing;
-        scalar_t sech_sq = 1.0 - tanh(v_energy) * tanh(v_energy);
-        scalar_t factor = dL_dM_plas * plasticity * sech_sq * (2.0 / static_cast<scalar_t>(dim));
+        scalar_t tanh_v = tanh(v_energy);
+        scalar_t sech_sq = 1.0 - tanh_v * tanh_v;
+        scalar_t factor = dL_dM_plas * (plasticity * 0.1) * sech_sq * (2.0 / static_cast<scalar_t>(dim));
         for (int i = 0; i < dim; ++i) {
             grad_v[i] += factor * v[i];
         }

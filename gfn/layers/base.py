@@ -13,6 +13,14 @@ from ..integrators import (
     ForestRuthIntegrator, OmelyanIntegrator, CouplingFlowIntegrator, NeuralIntegrator
 )
 from .gating import RiemannianGating
+from .thermo import ThermodynamicGating
+from ..geometry.confusion import ConfusionChristoffel
+from ..geometry.thermo import ThermodynamicChristoffel
+from ..geometry.holographic import AdSCFTChristoffel
+from ..geometry.ricci import RicciFlowChristoffel
+from ..integrators.adaptive import AdaptiveIntegrator
+from ..integrators.stochastic import StochasticIntegrator
+from ..noise.geometric import GeometricNoise
 
 class MLayer(nn.Module):
     """
@@ -124,6 +132,30 @@ class MLayer(nn.Module):
              christoffel_map[i] = create_manifold(i)
         
         for i in range(heads):
+            # 0. Holographic Geometry (Paper 18) - Bulk Wrapper
+            # This is the innermost wrapper as it defines the base bulk metric
+            holo_cfg = self.physics_config.get('active_inference', {}).get('holographic_geometry', {})
+            if holo_cfg.get('enabled', False):
+                christoffel_map[i] = AdSCFTChristoffel(christoffel_map[i])
+
+            # 1. Thermodynamic Geometry (Paper 15) - Inner Wrapper
+            thermo_geo_cfg = self.physics_config.get('active_inference', {}).get('thermodynamic_geometry', {})
+            if thermo_geo_cfg.get('enabled', False):
+                temperature = thermo_geo_cfg.get('temperature', 1.0)
+                alpha = thermo_geo_cfg.get('alpha', 0.1)
+                christoffel_map[i] = ThermodynamicChristoffel(christoffel_map[i], temperature=temperature, alpha=alpha)
+
+            # 2. Confusion Metric (Paper 08) - Plasticity Wrapper
+            confusion_cfg = self.physics_config.get('active_inference', {}).get('confusion_metric', {})
+            if confusion_cfg.get('enabled', False):
+                sensitivity = confusion_cfg.get('sensitivity', 1.0)
+                christoffel_map[i] = ConfusionChristoffel(christoffel_map[i], sensitivity=sensitivity)
+
+            # 3. Ricci Flow (Paper 17) - Smoothing Wrapper (Outermost)
+            ricci_cfg = self.physics_config.get('active_inference', {}).get('ricci_flow', {})
+            if ricci_cfg.get('enabled', False):
+                christoffel_map[i] = RicciFlowChristoffel(christoffel_map[i], lr=ricci_cfg.get('lr', 0.001))
+                
             self.christoffels.append(christoffel_map[i])
             
         self.register_buffer('headless_mode', torch.tensor(False)) 
@@ -134,11 +166,19 @@ class MLayer(nn.Module):
         self.topology_id = 1 if topo_type == 'torus' else 0
 
         if self.use_dynamic_time:
-            pass
-        
-        self.gatings = nn.ModuleList([
-            RiemannianGating(self.head_dim, topology=self.topology_id) for _ in range(heads)
-        ])
+            gating_type = self.physics_config.get('active_inference', {}).get('dynamic_time', {}).get('type', 'learned')
+            if gating_type == 'thermo':
+                self.gatings = nn.ModuleList([
+                    ThermodynamicGating(self.head_dim) for _ in range(heads)
+                ])
+            else:
+                self.gatings = nn.ModuleList([
+                    RiemannianGating(self.head_dim, topology=self.topology_id) for _ in range(heads)
+                ])
+        else:
+             self.gatings = nn.ModuleList([
+                RiemannianGating(self.head_dim, topology=self.topology_id) for _ in range(heads)
+            ])
         
         # Initialize per-head timestep parameters
         # dt_params are initialized to give base_dt when softplus is applied:
@@ -195,6 +235,32 @@ class MLayer(nn.Module):
                 integ = SymplecticIntegrator(self.christoffels[i], dt=self.base_dt)
             self.integrators.append(integ)
             
+        # Wrap with Adaptive Integrator if enabled (Paper 07)
+        adaptive_cfg = self.physics_config.get('active_inference', {}).get('adaptive_resolution', {})
+        if adaptive_cfg.get('enabled', False):
+            tolerance = adaptive_cfg.get('tolerance', 1e-3)
+            max_depth = adaptive_cfg.get('max_depth', 3)
+            for i in range(heads):
+                self.integrators[i] = AdaptiveIntegrator(
+                    self.integrators[i], 
+                    tolerance=tolerance, 
+                    max_depth=max_depth
+                )
+            
+        # Wrap with Stochastic Integrator if enabled (Paper 16)
+        stochastic_cfg = self.physics_config.get('active_inference', {}).get('stochastic_geometry', {})
+        if stochastic_cfg.get('enabled', False):
+            # We use a ModuleList to store noise modules so they are on same device
+            self.noises = nn.ModuleList([
+                GeometricNoise(self.head_dim, sigma=stochastic_cfg.get('sigma', 0.01))
+                for _ in range(heads)
+            ])
+            for i in range(heads):
+                self.integrators[i] = StochasticIntegrator(
+                    self.integrators[i],
+                    self.noises[i]
+                )
+            
         if heads > 1:
             self.out_proj_x = nn.Linear(3 * dim if self.topology_id == 1 else dim, dim)
             self.out_proj_v = nn.Linear(dim, dim)
@@ -248,7 +314,16 @@ class MLayer(nn.Module):
         use_gating = self.physics_config.get('active_inference', {}).get('dynamic_time', {}).get('enabled', False)
         
         if use_gating:
-            gates = torch.stack([self.gatings[i](x_heads[i]) for i in range(self.heads)], dim=0)
+            # Check integration signature: Thermodynamic needs v, Riemmanian only x
+            gates_list = []
+            for i in range(self.heads):
+                gate_mod = self.gatings[i]
+                if isinstance(gate_mod, ThermodynamicGating):
+                    gates_list.append(gate_mod(x_heads[i], v_heads[i]))
+                else:
+                    gates_list.append(gate_mod(x_heads[i]))
+            
+            gates = torch.stack(gates_list, dim=0)
             scale = dt_base * gates # [Heads, Batch, 1]
         else:
             # Dummy gates for context passing

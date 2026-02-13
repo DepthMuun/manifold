@@ -17,7 +17,8 @@ namespace cuda {
  */
 GFN_DEVICE scalar_t apply_boundary_device(scalar_t x, Topology topology) {
     if (topology == Topology::TORUS) {
-        return atan2f(sinf(x), cosf(x));
+        scalar_t wrapped = atan2f(sinf(x), cosf(x));
+        return wrapped < 0.0f ? wrapped + TWO_PI : wrapped;
     }
     return x;
 }

@@ -85,6 +85,9 @@ OPTIMAL_PHYSICS_CONFIG = {
     },
     'stability': {
         'base_dt': 0.4
+    },
+    'cuda_fusion': {
+        'allow_fused_training': True
     }
 }
 
@@ -250,9 +253,9 @@ def train_model(model_name, model, max_steps=1000, device='cuda', is_manifold=Tr
     min_steps = 100
     patience = 20
     hits = 0
+    L = 20
+    task = ParityTask(length=L)
     for i in pbar:
-        L = 20
-        task = ParityTask(length=L)
         x, y_class, y_angle = task.generate_batch(128, device=device)
         
         if is_manifold:

@@ -48,14 +48,18 @@ __global__ void christoffel_backward_kernel(
         h[i] = sum;
         h_energy += sum * sum;
     }
+    if (rank > 0) {
+        h_energy /= static_cast<scalar_t>(rank);
+    }
     scalar_t norm = sqrtf(h_energy);
-    scalar_t S = 1.0f / (1.0f + norm + 1e-4f);
+    scalar_t S = 1.0f / (1.0f + norm + EPSILON_STANDARD);
     
     scalar_t M_plas = 1.0f;
     if (plasticity != 0.0f) {
         scalar_t v_e = 0.0f;
         for (int i = 0; i < dim; ++i) v_e += v_b[i] * v_b[i];
-        M_plas = (1.0f + plasticity * tanhf(v_e / dim));
+        v_e /= static_cast<scalar_t>(dim);
+        M_plas = (1.0f + plasticity * 0.1f * tanhf(v_e));
     }
     
     scalar_t M_sing = 1.0f;
@@ -69,12 +73,18 @@ __global__ void christoffel_backward_kernel(
     }
     scalar_t M = M_plas * M_sing;
 
+    scalar_t grad_raw[128];
+    for (int i = 0; i < dim; ++i) {
+        scalar_t t = gamma_b[i] / CURVATURE_CLAMP;
+        grad_raw[i] = grad_out_b[i] * (1.0f - t * t);
+    }
+    
     for (int j = 0; j < rank; ++j) {
         grad_q[j] = 0.0f;
         scalar_t q_base = h[j] * h[j] * S * M;
         for (int i = 0; i < dim; ++i) {
-            atomicAdd(&grad_W[i * rank + j], grad_out_b[i] * q_base);
-            grad_q[j] += W[i * rank + j] * grad_out_b[i];
+            atomicAdd(&grad_W[i * rank + j], grad_raw[i] * q_base);
+            grad_q[j] += W[i * rank + j] * grad_raw[i];
         }
     }
     

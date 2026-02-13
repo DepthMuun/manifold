@@ -946,45 +946,333 @@ Para un tensor (1,1): ∇k T^i_j = ∂k T^i_j + Γ^i{mk} T^m_j - Γ^m{jk} T^i_m
 8.3 Convenciones de Suma y Conveniencia
 La convención de suma de Einstein (sumar sobre índices repetidos, uno arriba y uno abajo) se usa inconsistentemente. Algunos papers escriben explícitamente las sumas, otros asumen la convención sin especificarla, y algunos la usan incorrectamente con ambos índices en la misma posición.
 
-9. Resumen de Correcciones Recomendadas
-9.1 Correcciones de Alta Prioridad
+9. Análisis de Papers 21-28 (Extensiones Recientes)
+
+9.1 Paper 21 — Adaptive Rank Christoffel Symbol Decomposition (AR-CSD)
+
+9.1.1 Problemas de Diferenciabilidad en el Slicing de Rango
+
+El rango efectivo se calcula como:
+
+r(v) = clamp(⌊ρ(v) · R_max⌋, r_min, R_max)
+
+La función floor (⌊·⌋) introduce una discontinuidad que rompe la diferenciabilidad end-to-end. Aunque el paper afirma en Proposición 2 que Γ_θ(v) es continua, la demostración es insuficiente: el slicing U_full[:, :r] produce un salto discreto cuando r cambia, y los gradientes no fluyen a través de la operación floor.
+
+**Corrección recomendada:** Utilizar una relajación suave tipo Gumbel-Softmax o straight-through estimator para mantener diferenciabilidad durante el entrenamiento. Alternativamente, usar una máscara suave con sigmoid en lugar del slicing discreto:
+
+mask_a = σ(κ · (a - r(v)))  donde κ → ∞ en inferencia
+
+9.1.2 Inconsistencia en la Factorización Low-Rank
+
+La formulación presenta dos versiones incompatibles. La sección 2.2 define una factorización trilineal:
+
+Γ^k_{ij}(x) v^i v^j = A^k_a(x) B^a_b(x) C^b_{ij}(x) v^i v^j
+
+pero la sección 3.1 usa una bilineal simplificada:
+
+Γ(v)^k = U^k_a z^a,   z^a = W^a_{ij} v^i v^j
+
+Sin indicar la relación entre ambas ni justificar cuándo cada una es apropiada. La factorización bilineal omite la dependencia en posición x de W, lo cual contradice la definición de Christoffel como operador dependiente de la posición.
+
+9.1.3 Normalización de Escala
+
+La normalización propuesta:
+
+z̃_a = z_a · 1/(1 + ‖z‖₂ + ε)
+
+no tiene motivación geométrica. Divide por una cantidad con dimensiones de curvatura, lo cual modifica la magnitud de los símbolos de Christoffel de forma no covariante. Una normalización covariante debería usar la métrica: z̃_a = z_a / √(g^{ab} z_a z_b + ε).
+
+9.2 Paper 22 — Hierarchical Multi-Scale Christoffel Symbolic Mixture (HM-CSM)
+
+9.2.1 Mezcla Lineal de Christoffel
+
+La formulación:
+
+Γ_HM(v) = Σᵢ wᵢ · Γᵢ(v)
+
+realiza una combinación convexa de outputs de Christoffel. Esto es problemáticamente incorrecto desde el punto de vista geométrico: una combinación convexa de conexiones NO es en general una conexión derivada de ninguna métrica. Si Γ₁ y Γ₂ son conexiones de Levi-Civita de métricas g₁ y g₂ respectivamente, la combinación w₁Γ₁ + w₂Γ₂ NO es la conexión de Levi-Civita de w₁g₁ + w₂g₂.
+
+**Corrección recomendada:** La mezcla multi-escala debe operar a nivel de MÉTRICA, no de conexión:
+
+g_HM(x) = Σᵢ wᵢ · gᵢ(x)
+
+y los Christoffel deben calcularse a partir de esta métrica combinada mediante las fórmulas de Koszul. Esto preserva compatibilidad con métrica y torsión cero.
+
+9.2.2 Proposición 3 (Aproximación Universal)
+
+La demostración de la Proposición 3 es circular: afirma que "mezclas finitas de funciones low-rank son densas en el espacio de funciones continuas" sin citar un teorema de aproximación universal aplicable al caso específico de operadores tensoriales simétricos de orden 3. La densidad en la norma uniforme requiere condiciones sobre la compacidad del dominio y la topología del espacio de funciones Christoffel que no se verifican.
+
+9.2.3 Independencia de Escala de los Pesos
+
+Los pesos de mezcla αᵢ son parámetros globales (independientes del input). Esto limita la adaptabilidad del modelo: la importancia relativa de cada escala no puede cambiar según la región del manifold. Esto contrasta directamente con el Paper 21 (Adaptive Rank) que sí adapta al input.
+
+9.3 Paper 23 — Riemannian Adam (R-Adam)
+
+9.3.1 Transporte Vectorial Aproximado
+
+El paper usa transporte por proyección como aproximación al transporte paralelo. Para la retracción normalizada (esfera), el error de esta aproximación es O(‖Δp‖²), lo cual puede ser significativo para pasos de optimización grandes. El paper no proporciona cotas de error ni análisis de cuándo la aproximación es inadecuada.
+
+Para variedades de alta curvatura (como las que el propio framework GFN aprende), la curvatura seccional puede ser grande, y el error acumulado del transporte aproximado puede desviar los momentos significativamente de sus valores correctos.
+
+9.3.2 Retracción de Cayley
+
+La formulación presentada:
+
+R_p(v) = (I - ½v)(I + ½v)⁻¹ p
+
+tiene un error sutil: v debe ser una matriz antisimétrica (v = -vᵀ) para que la retracción produzca matrices ortogonales. Sin embargo, el papel no impone esta restricción en el gradiente proyectado. La proyección correcta del gradiente al espacio tangente de O(n) en el punto P requiere:
+
+v_tangente = ½(PᵀG - GᵀP)
+
+donde G es el gradiente Euclídeo. Esta antisimetrización no se menciona explícitamente.
+
+9.3.3 Transporte Vectorial Toroidal
+
+El paper afirma que "el transporte paralelo en el toro es trivial (identidad) porque el toro tiene curvatura cero." Esto es correcto SOLO para el toro plano (con la métrica plana heredada de ℝⁿ). Sin embargo, en el framework GFN, el toro puede tener una métrica aprendida que NO es plana. Los Christoffel aprendidos inducen curvatura no nula, por lo que el transporte vectorial NO es la identidad en general. Esta es una inconsistencia directa con el resto del framework.
+
+9.3.4 Weight Decay en el Toro
+
+El "smooth decay" para parámetros toroidales no se formaliza. El weight decay estándar λ·p empuja parámetros hacia cero, pero en coordenadas toroidales [0, 2π), el punto cero es arbitrario. Un decay geométricamente correcto debería empujar hacia un punto de referencia definido en el toro, usando la distancia geodésica:
+
+decay = λ · d_toro(p, p_ref)
+
+donde d_toro es la distancia mínima en el toro.
+
+9.4 Paper 24 — Fractal Manifold Tunneling (FMT)
+
+9.4.1 Proxy de Curvatura Inadecuado
+
+La norma de Frobenius de los Christoffel:
+
+R = ‖Γ‖ = √(Σᵢ ‖Γᵢ‖²_F)
+
+NO es un invariante geométrico. Los Christoffel dependen de la elección de coordenadas, por lo que su norma no es intrínseca al manifold. La curvatura seccional o el escalar de Ricci serían medidas intrínsecas más apropiadas:
+
+R_scalar = g^{ij} R_{ij}
+
+Sin embargo, calcular la curvatura de Ricci requiere derivadas de los Christoffel, lo cual es computacionalmente costoso. Una aproximación más correcta sería usar la norma de la aceleración geodésica:
+
+κ(x, v) = ‖Γ^k_{ij}(x) v^i v^j‖_g = √(g_{kl} Γ^k_{ij} v^i v^j Γ^l_{mn} v^m v^n)
+
+que al menos incluye la métrica en la norma.
+
+9.4.2 Blending No Simpléctico
+
+El blending lineal:
+
+x_final = (1 - α) x_macro + α x_micro
+
+NO preserva la estructura simpléctica del espacio de fases. Si tanto el macro como el micro paso son simplécticos individualmente, su combinación convexa NO lo es en general. Esto viola una de las propiedades fundamentales que el framework GFN busca preservar.
+
+**Corrección recomendada:** Usar una interpolación geodésica (en el manifold) en lugar de lineal (en el espacio ambient):
+
+x_final = exp_{x_macro}(α · exp⁻¹_{x_macro}(x_micro))
+
+9.4.3 Dimensión Fractal
+
+La fórmula de dimensión fractal efectiva:
+
+D_f = D_macro + (D_micro - D_macro) · p
+
+es una interpolación lineal que no corresponde a ninguna definición estándar de dimensión fractal (Hausdorff, box-counting, o información). La dimensión fractal de una construcción auto-similar no se calcula como media ponderada de las dimensiones de sus componentes.
+
+9.5 Paper 25 — Hamiltonian Pooling (H-Pool)
+
+9.5.1 Confusión Momento-Velocidad
+
+El paper identifica directamente el momentum p con la velocidad v: "if we identify p with v and q with x (using mass as unity)". En geometría Riemanniana, la relación correcta es:
+
+pᵢ = gᵢⱼ(x) vʲ
+
+que solo se reduce a p = v cuando g = I (métrica Euclídea). Dado que el framework GFN usa métricas aprendidas no triviales, esta identificación es incorrecta. El Hamiltoniano correcto debería ser:
+
+H = ½ g^{ij}(x) pᵢ pⱼ + V(x) = ½ gᵢⱼ(x) vⁱ vʲ + V(x)
+
+La formulación del paper usa v^T g v para la energía cinética, lo cual es correcto en notación matricial, pero las ecuaciones de Hamilton se derivan respecto a p, no a v, lo cual requiere la transformación de Legendre.
+
+9.5.2 Potencial Cuadrático Isotrópico
+
+El potencial U = ½‖x‖² usa la norma Euclídea, NO la norma Riemanniana. En un manifold con métrica g, el potencial geométricamente correcto sería:
+
+U(x) = ½ gᵢⱼ(x) xⁱ xʲ    o    U(x) = ½ d²_g(x, x₀)
+
+donde d_g es la distancia geodésica a un punto de referencia x₀. El uso de la norma Euclídea introduce una dependencia en la elección de coordenadas que rompe la covarianza del framework.
+
+9.5.3 Signo de la Distribución de Boltzmann
+
+El paper usa αᵢ ∝ exp(-Hᵢ/T), asignando MAYOR peso a tokens de MENOR energía. Esto invierte la intuición física declarada en la introducción: "high-energy states are more important [...] they represent configurations with strong interactions." La distribución de Boltzmann favorece estados de baja energía (equilibrio térmico), lo cual contradice la motivación del paper.
+
+Para ser consistente con la motivación, debería usarse:
+
+αᵢ ∝ exp(+Hᵢ/T)    (distribución anti-Boltzmann)
+
+o bien reformular la motivación física.
+
+9.6 Paper 26 — Curiosity-Driven Entropy Exploration (CDEE)
+
+9.6.1 Estimador de Entropía con Covarianza Diagonal
+
+El proxy de entropía:
+
+S(V) = ½ Σⱼ log(σⱼ(V)² + ε)
+
+asume covarianza diagonal (componentes independientes). Este estimador subestima la entropía verdadera cuando existen correlaciones entre componentes. Para la distribución Gaussiana multivariante, la entropía correcta es:
+
+h = ½ log det(2πe Σ)
+
+donde Σ es la matriz de covarianza COMPLETA. La diferencia puede ser significativa:
+
+h_real - S = ½ log det(Σ) - ½ Σⱼ log(σⱼ²) = ½ log(det(Σ) / Πⱼ σⱼ²)
+
+Este término es cero solo si Σ es diagonal, y negativo en caso contrario (por la desigualdad de Hadamard). Esto significa que el estimador diagonal SOBREESTIMA la entropía, no la subestima, lo cual puede llevar a pensar que la exploración es suficiente cuando no lo es.
+
+9.6.2 Invarianza de Coordenadas
+
+La entropía diferencial NO es invariante bajo cambios de coordenadas. Si aplicamos una transformación x' = f(x) con Jacobiano J, la entropía cambia como:
+
+h(X') = h(X) + E[log|det J|]
+
+En un manifold con métrica g, la medida natural es √(det g) dⁿx, y la entropía intrínseca es:
+
+h_g(X) = -∫ p(x) log(p(x)/√(det g(x))) √(det g(x)) dⁿx
+
+El estimador del paper ignora completamente la métrica del manifold, lo cual es inconsistente con el framework geométrico de GFN.
+
+9.6.3 Proposición 3 (Interpretación Termodinámica)
+
+La afirmación de que maximizar la entropía de velocidades es equivalente al segundo principio de la termodinámica es una analogía forzada. El segundo principio aplica a sistemas aislados en equilibrio termodinámico, mientras que una red neural en entrenamiento es un sistema abierto (recibe datos) y fuera de equilibrio (los gradientes lo empujan). La conexión es metafórica, no rigurosa.
+
+9.7 Paper 27 — Parallel Manifold Scan Layer (P-MLayer)
+
+9.7.1 Pérdida de Estructura Cuadrática
+
+La linealización:
+
+v̇ = -D(F)·v + F
+
+reemplaza la dinámica cuadrática Γ^k_{ij} v^i v^j con una dinámica lineal D·v. Esto elimina la información geométrica fundamental: la dependencia cuadrática en v es lo que distingue geodésicas de líneas rectas. La linealización solo es válida para perturbaciones pequeñas alrededor de un punto de operación v₀, y el error crece como O(‖v - v₀‖²).
+
+**Impacto práctico:** Para estados con velocidad grande (alta energía cinética), la aproximación lineal puede divergir significativamente de la dinámica geodésica real. Esto compromete precisamente la física que el framework GFN busca capturar.
+
+9.7.2 Predicción de A_t desde la Fuerza (no la posición)
+
+Los coeficientes de la recurrencia se predicen como:
+
+A_t = σ(W_A F_t + b_A)
+
+donde F_t es la fuerza de input. Los Christoffel reales dependen de la POSICIÓN x_t, no de la fuerza F_t. Predecir A_t desde F_t rompe la dependencia geométrica fundamental. Una formulación más correcta sería:
+
+A_t = σ(W_A [x_t, F_t] + b_A)
+
+incluyendo la posición para preservar la dependencia geométrica.
+
+9.7.3 Escalas de Tiempo Multi-Escala
+
+La progresión exponencial sᵢ = 1.5ⁱ carece de justificación matemática. ¿Por qué 1.5 y no 2 o e? La elección óptima de la base de la progresión debería depender de la distribución de frecuencias temporales en los datos. Un análisis espectral del manifold aprendido podría guiar esta elección.
+
+9.7.4 Incompatibilidad con Generación Autoregresiva
+
+El scan paralelo requiere TODA la secuencia disponible a priori. Esto lo hace incompatible con la generación autoregresiva (token a token), que es el caso de uso principal de muchos modelos de lenguaje. El paper menciona esta limitación pero no propone solución.
+
+9.8 Paper 28 — Noether Symmetry Regularization (NSR)
+
+9.8.1 Simetrías Continuas vs. Discretas
+
+El teorema de Noether aplica a simetrías CONTINUAS. El grupo de permutaciones Sₖ es un grupo DISCRETO y FINITO. El teorema de Noether no se aplica directamente a simetrías discretas; existe una versión discreta (teoremas de Ward), pero su formulación es diferente.
+
+La afirmación de que "la simetría de permutación de cabezas isoméricas es una simetría continua en el sentido de que puede ser continuamente deformada" es incorrecta. El grupo simétrico Sₖ no es un grupo de Lie y no admite una deformación continua que preserve la estructura de grupo.
+
+9.8.2 Definición de Carga de Noether
+
+La "carga" definida como:
+
+Qᵢ(v) = Γ_{h_i}(v) - Γ_ref(v)
+
+no es una carga de Noether en sentido técnico. Una carga de Noether es una cantidad CONSERVADA a lo largo del flujo dinámico, y se calcula como:
+
+Q = (∂L/∂q̇) · δq - F
+
+donde L es el Lagrangiano y δq la variación infinitesimal. La diferencia de outputs entre cabezas no tiene esta estructura y no satisface ∂Q/∂t = 0 a lo largo de trayectorias.
+
+**Corrección recomendada:** Renombrar a "discrepancia de simetría" o "divergencia inter-cabeza" para evitar confusión con la terminología estándar de física teórica.
+
+9.8.3 Loss MSE vs. Invarianza Geométrica
+
+El loss:
+
+L_NSR = λ · MSE(Γᵢ, Γⱼ)
+
+usa la norma Euclídea (MSE) para comparar outputs de Christoffel. La comparación correcta debería usar la métrica del manifold target:
+
+L_NSR = λ · gₖₗ(Γᵢ^k - Γⱼ^k)(Γᵢ^l - Γⱼ^l)
+
+para ser covariante bajo cambios de coordenadas.
+
+9.8.4 Simetrías Alternativas Mal Formuladas
+
+En el Apéndice A, la simetría de escalado se presenta como:
+
+Γᵢ(v) = sᵢ · Γ_ref(s⁻¹ᵢ v)
+
+Esto implica que los Christoffel escalan linealmente con el factor de escala, lo cual contradice la homogeneidad cuadrática: para Christoffel estándar, Γ^k_{ij} v^i v^j es cuadrático en v, por lo que Γ^k_{ij}(sv)^i(sv)^j = s² Γ^k_{ij} v^i v^j, NO s · Γ^k_{ij} v^i v^j.
+
+
+10. Resumen de Correcciones Recomendadas
+
+10.1 Correcciones de Alta Prioridad
+
 Las correcciones más críticas que afectan la validez de las formulaciones principales incluyen:
 
-Símbolos de Christoffel: Reemplazar Γ(v) = UV^T v con Γ^k_ij(x) = (UV^T)^k_{ij} donde la factorización captura la dependencia en x, no en v.
+1. **Símbolos de Christoffel:** Reemplazar Γ(v) = UVᵀv con Γ^k_{ij}(x) = (UVᵀ)^k_{ij} donde la factorización captura la dependencia en x, no en v.
 
-Métrica learnable: Implementar parametrización explícita que garantice definidad positiva, como g = exp(S) con S simétrica.
+2. **Métrica learnable:** Implementar parametrización explícita que garantice definidad positiva, como g = exp(S) con S simétrica.
 
-Derivada covariante: Usar Dv/dt en lugar de dv/dt en todas las ecuaciones geodésicas, especificando explícitamente la estructura de índices.
+3. **Derivada covariante:** Usar Dv/dt en lugar de dv/dt en todas las ecuaciones geodésicas, especificando explícitamente la estructura de índices.
 
-Ecuación de Langevin en variedades: Incluir el término de drift正确 que involucra la conexión de Levi-Civita.
+4. **Ecuación de Langevin en variedades:** Incluir el término de drift geométrico que involucra la conexión de Levi-Civita (σ² Γⁱⱼₖ gʲᵏ).
 
-9.2 Correcciones de Prioridad Media
-Hamiltoniano: Clarificar la identificación entre momento canónico y velocidad, especificando la estructura del espacio de fases.
+5. **Mezcla multi-escala (Paper 22):** Operar la mezcla a nivel de MÉTRICA, no de conexión, para preservar compatibilidad con métrica.
 
-Entropía diferencial: Usar el determinante de la covarianza completa en lugar de la suma de logs de varianzas.
+6. **Diferenciabilidad del rango adaptativo (Paper 21):** Usar relajación suave (Gumbel-Softmax o straight-through) en lugar de floor discreto.
 
-Integración adaptativa: Reemplazar heurísticas con análisis de número de condición espectral.
+10.2 Correcciones de Prioridad Media
 
-9.3 Correcciones de Presentación
-Notación: Estandarizar el uso de índices covariantes/contravariantes y la convención de Einstein.
+1. **Hamiltoniano (Paper 25):** Clarificar la identificación entre momento canónico pᵢ = gᵢⱼvʲ y velocidad vⁱ, y resolver la contradicción del signo Boltzmann.
 
-Referencias físicas: Cuando se usan analogías físicas (AdS/CFT, Relatividad), indicar explícitamente las limitaciones de la analogía.
+2. **Entropía diferencial (Paper 26):** Usar el determinante de la covarianza completa en lugar de la suma de logs de varianzas. Incluir la corrección por la métrica del manifold.
 
-Demostraciones: Algunas proposiciones carecen de demostraciones rigurosas o usan "Proof Sketch" sin proporcionar detalles suficientes.
+3. **Integración adaptativa:** Reemplazar heurísticas con análisis de número de condición espectral.
 
-10. Conclusiones y Recomendaciones
-La revisión exhaustiva de los 29 papers revela un esfuerzo ambicioso por aplicar geometría diferencial y física matemática a arquitecturas de aprendizaje profundo. Sin embargo, múltiples formulaciones matemáticas requieren corrección para alcanzar el rigor científico necesario para publicación en venues de alta calidad.
+4. **Proxy de curvatura (Paper 24):** Reemplazar la norma de Frobenius de Christoffel por una medida intrínseca como la curvatura escalar o la norma de la aceleración geodésica.
+
+5. **Transporte vectorial toroidal (Paper 23):** Reconocer que el transporte en toros con métrica aprendida NO es trivial.
+
+6. **Linealización del scan paralelo (Paper 27):** Incluir la posición x_t en la predicción de A_t para preservar dependencia geométrica.
+
+10.3 Correcciones de Presentación
+
+1. **Notación:** Estandarizar el uso de índices covariantes/contravariantes y la convención de Einstein en todos los papers.
+
+2. **Referencias físicas:** Cuando se usan analogías físicas (AdS/CFT, Noether, Boltzmann), indicar explícitamente las limitaciones de la analogía y las diferencias con la formulación original.
+
+3. **Demostraciones:** Algunas proposiciones carecen de demostraciones rigurosas o usan "Proof Sketch" sin proporcionar detalles suficientes. Esto es especialmente notorio en Papers 22 (Prop. 3), 24 (Prop. 2), y 28 (conexión con Noether).
+
+4. **Terminología (Paper 28):** Renombrar "cargas de Noether" a "divergencias de simetría" para evitar confusión con la terminología estándar de física teórica.
+
+11. Conclusiones y Recomendaciones
+
+La revisión exhaustiva de los 31 documentos (papers 00-28, GFN_PAPER, y documentos auxiliares) revela un esfuerzo ambicioso por aplicar geometría diferencial y física matemática a arquitecturas de aprendizaje profundo. Los papers 21-28 extienden significativamente el framework con mecanismos de computación adaptativa, optimización Riemanniana, y regularización basada en simetría, pero introducen nuevas categorías de problemas matemáticos.
 
 Las principales áreas problemáticas identificadas son:
 
-1.
-Confusión entre el tensor de Christoffel y su acción sobre vectores: La estructura tensorial completa debe preservarse.
-2.
-Parametrización de métricas learnable: Se necesitan garantías explícitas de definidad positiva.
-3.
-Analogías físicas sin rigor: Las conexiones con física teórica (AdS/CFT, Relatividad) deben indicar claramente las limitaciones de las analogías.
-4.
-Estimación de entropía: El estimador Gaussiano debe usar el determinante completo de la covarianza.
-5.
-Formulación estocástica en variedades: La ecuación de Langevin debe incluir los términos correctos de drift.
-Se recomienda una revisión sistemática de todas las formulaciones matemáticas antes de la publicación final, preferiblemente con revisión por expertos en geometría diferencial y física matemática.
+1. **Confusión entre el tensor de Christoffel y su acción sobre vectores:** La estructura tensorial completa debe preservarse. Esto persiste en papers nuevos (22, 27).
+2. **Parametrización de métricas learnable:** Se necesitan garantías explícitas de definidad positiva.
+3. **Analogías físicas sin rigor:** Las conexiones con física teórica (AdS/CFT, Noether, Boltzmann) deben indicar claramente las limitaciones. Papers 25 y 28 introducen nuevas analogías problemáticas.
+4. **Estimación de entropía:** El estimador Gaussiano diagonal del Paper 26 sobreestima la entropía y ignora la métrica del manifold.
+5. **Formulación estocástica en variedades:** La ecuación de Langevin debe incluir los términos correctos de drift.
+6. **Diferenciabilidad:** El Paper 21 introduce operaciones no diferenciables (floor) en una pipeline que requiere backpropagation end-to-end.
+7. **Preservación de estructura simpléctica:** El blending lineal del Paper 24 y la linealización del Paper 27 violan la simplecticidad que el framework busca preservar.
+8. **Mezcla de conexiones vs. mezcla de métricas:** El Paper 22 mezcla Christoffel linealmente, lo cual no produce una conexión de Levi-Civita válida.
+9. **Covarianza de coordenadas:** Papers 25 (potencial Euclídeo) y 28 (MSE loss) usan operaciones no covariantes en un framework intrínsecamente geométrico.
+
+Se recomienda una revisión sistemática de todas las formulaciones matemáticas antes de la publicación final, preferiblemente con revisión por expertos en geometría diferencial y física matemática. Los papers 21-28 requieren especial atención en cuanto a la consistencia con los principios geométricos establecidos en los papers fundamentales (00-08).

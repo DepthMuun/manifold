@@ -203,9 +203,9 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
         from .ops import ChristoffelOperation
         
         op = ChristoffelOperation({
-            'curvature_clamp': 3.0,
-            'epsilon': 1e-8,
-            'singularity_gate_slope': 1.0
+            'curvature_clamp': CudaConstants.CURVATURE_CLAMP,
+            'epsilon': CudaConstants.EPSILON_STANDARD,
+            'singularity_gate_slope': CudaConstants.SINGULARITY_GATE_SLOPE
         })
         
         gamma = op.forward(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology)
@@ -331,8 +331,9 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 dt: float, dt_scale: float, steps: int,
                 topology: int,
                 Wf: Optional[torch.Tensor], bf: Optional[torch.Tensor],
+                W_input: Optional[torch.Tensor],
                 plasticity: float, sing_thresh: float, sing_strength: float, R: float, r: float,
-                # AUDIT FIX (Component 7): Hysteresis parameters
+                velocity_friction_scale: float,
                 hysteresis_state: torch.Tensor,
                 hyst_update_w: torch.Tensor,
                 hyst_update_b: torch.Tensor,
@@ -361,6 +362,10 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
             bf = bf.contiguous()
         else:
             bf = torch.empty(0, device=x.device, dtype=x.dtype)
+        if W_input is not None and W_input.numel() > 0:
+            W_input = W_input.contiguous()
+        else:
+            W_input = torch.empty(0, device=x.device, dtype=x.dtype)
         
         # Try using CUDA
         if is_cuda:
@@ -370,8 +375,9 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 x_out, v_out = gfn_cuda.leapfrog_fused(
                     x, v, force, U, W,
                     float(dt), float(dt_scale), int(steps), int(topology),
-                    Wf, bf, float(plasticity), float(sing_thresh), float(sing_strength), float(R), float(r),
-                    # AUDIT FIX: Pass hysteresis parameters
+                    Wf, bf, W_input,
+                    float(plasticity), float(sing_thresh), float(sing_strength), float(R), float(r),
+                    float(velocity_friction_scale),
                     hysteresis_state, hyst_update_w, hyst_update_b,
                     hyst_readout_w, hyst_readout_b, float(hyst_decay), hyst_enabled
                 )
@@ -386,6 +392,8 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 ctx.sing_strength = sing_strength
                 ctx.R = R
                 ctx.r = r
+                ctx.W_input = W_input
+                ctx.velocity_friction_scale = velocity_friction_scale
                 # AUDIT FIX: Save hysteresis parameters
                 ctx.hysteresis_state = hysteresis_state
                 ctx.hyst_update_w = hyst_update_w
@@ -441,10 +449,10 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 
                 grads = gfn_cuda.leapfrog_backward_fused(
                     grad_x_out.contiguous(), grad_v_out.contiguous(),
-                    x, v, force, U, W, Wf, bf,
+                    x, v, force, U, W, Wf, bf, ctx.W_input,
                     float(ctx.dt), float(ctx.dt_scale), int(ctx.steps), int(ctx.topology),
                     float(ctx.plasticity), float(ctx.sing_thresh), float(ctx.sing_strength), float(ctx.R), float(ctx.r),
-                    # AUDIT FIX: Pass hysteresis parameters from ctx
+                    float(ctx.velocity_friction_scale),
                     ctx.hysteresis_state, ctx.hyst_update_w, ctx.hyst_update_b,
                     ctx.hyst_readout_w, ctx.hyst_readout_b, float(ctx.hyst_decay), ctx.hyst_enabled
                 )
@@ -542,11 +550,13 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
                             topology: int = 0,
                             Wf: Optional[torch.Tensor] = None,
                             bf: Optional[torch.Tensor] = None,
+                            W_input: Optional[torch.Tensor] = None,
                             plasticity: float = 0.0,
                             sing_thresh: float = 0.5,
                             sing_strength: float = 2.0,
                             R: float = 2.0,
                             r: float = 1.0,
+                            velocity_friction_scale: float = 0.0,
                             # AUDIT FIX (Component 7): Hysteresis parameters with defaults
                             hysteresis_state: Optional[torch.Tensor] = None,
                             hyst_update_w: Optional[torch.Tensor] = None,
@@ -583,6 +593,8 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
         Wf = torch.empty(0, device=x.device, dtype=x.dtype)
     if bf is None:
         bf = torch.empty(0, device=x.device, dtype=x.dtype)
+    if W_input is None:
+        W_input = torch.empty(0, device=x.device, dtype=x.dtype)
     
     # AUDIT FIX: Prepare hysteresis tensors
     if hysteresis_state is None:
@@ -597,7 +609,8 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
         hyst_readout_b = torch.empty(0, device=x.device, dtype=x.dtype)
     
     return LeapfrogAutogradFunction.apply(
-        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength, R, r,
+        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, W_input,
+        plasticity, sing_thresh, sing_strength, R, r, velocity_friction_scale,
         hysteresis_state, hyst_update_w, hyst_update_b, hyst_readout_w, hyst_readout_b,
         hyst_decay, hyst_enabled
     )
@@ -619,62 +632,42 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
                                        topology: int = 0,
                                        R: float = 2.0, r: float = 1.0,
                                        **kwargs) -> Tuple:
-    """
-    Multi-layer manifold fusion (placeholder).
-    """
-    # For now, delegate to Python fallback
-    from .ops import ChristoffelOperation
-    
     device = x.device
-    dtype = x.dtype
     B, D = x.shape
     T = f.shape[1]
     num_layers = U_stack.shape[0] // num_heads
     head_dim = D // num_heads
-    
-    # Simplified implementation for testing
     x_curr = x
     v_curr = v
     x_seq = []
-    
-    christoffel_op = ChristoffelOperation()
-    
+    U_reshaped = U_stack.view(num_layers, num_heads, head_dim, -1)
+    W_reshaped = W_stack.view(num_layers, num_heads, head_dim, -1).permute(0, 1, 3, 2)
     for t in range(T):
         force_t = f[:, t]
-        
+        x_heads = x_curr.view(B, num_heads, head_dim)
+        v_heads = v_curr.view(B, num_heads, head_dim)
+        f_heads = force_t.view(B, num_heads, head_dim)
         for layer_idx in range(num_layers):
-            x_out = []
-            v_out = []
-            
-            for h in range(num_heads):
-                s = h * head_dim
-                e = (h + 1) * head_dim
-                
-                x_h = x_curr[:, s:e]
-                v_h = v_curr[:, s:e]
-                f_h = force_t[:, s:e]
-                
-                # Simple integration
-                gamma = christoffel_op.forward(v_h, U_stack[layer_idx * num_heads + h],
-                                              W_stack[layer_idx * num_heads + h])
-                
-                dt_eff = dt * (dt_scales[layer_idx, h] if dt_scales.dim() > 1 else dt_scales)
-                
-                v_h = v_h + dt_eff * (f_h - gamma)
-                x_h = x_h + dt_eff * v_h
-                
-                if topology == 1:
-                    # AUDIT FIX: Use atan2 for smooth gradients
-                    x_h = torch.atan2(torch.sin(x_h), torch.cos(x_h))
-                
-                x_out.append(x_h)
-                v_out.append(v_h)
-            
-            x_curr = torch.cat(x_out, dim=-1)
-            v_curr = torch.cat(v_out, dim=-1)
-        
+            U_l = U_reshaped[layer_idx]
+            W_l = W_reshaped[layer_idx]
+            h = torch.einsum('bhd,hdr->bhr', v_heads, U_l)
+            gamma = torch.einsum('bhr,hrd->bhd', h * h, W_l)
+            gamma = CudaConstants.CURVATURE_CLAMP * torch.tanh(gamma / CudaConstants.CURVATURE_CLAMP)
+            if dt_scales.numel() > 0:
+                if dt_scales.dim() > 1:
+                    dt_eff = dt * dt_scales[layer_idx % dt_scales.size(0)].view(1, num_heads, 1)
+                else:
+                    dt_eff = dt * dt_scales[layer_idx % dt_scales.size(0)].view(1, 1, 1)
+            else:
+                dt_eff = torch.tensor(dt, device=device, dtype=x.dtype).view(1, 1, 1)
+            v_heads = v_heads + dt_eff * (f_heads - gamma)
+            x_heads = x_heads + dt_eff * v_heads
+            if topology == 1:
+                x_heads = torch.fmod(x_heads, 2 * torch.pi)
+                x_heads = torch.where(x_heads < 0, x_heads + 2 * torch.pi, x_heads)
+        x_curr = x_heads.reshape(B, D)
+        v_curr = v_heads.reshape(B, D)
         x_seq.append(x_curr)
-    
     x_seq = torch.stack(x_seq, dim=1)
     return x_curr, v_curr, x_seq, torch.zeros((), device=device), None
 
@@ -697,3 +690,105 @@ def disable_timing():
 def reset_timing():
     """Resets timing statistics."""
     timing_registry.reset()
+
+
+def toroidal_leapfrog_fused_autograd(
+    x: torch.Tensor, 
+    v: torch.Tensor, 
+    f: torch.Tensor,
+    R: float,
+    r: float,
+    dt: float,
+    batch: int,
+    seq_len: int,
+    dim: int,
+    hysteresis_state: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Toroidal leapfrog integration with autograd support.
+    
+    This function implements toroidal manifold integration in pure PyTorch
+    to support autograd during training. It computes metric-derived Christoffel
+    symbols for toroidal geometry and performs leapfrog integration.
+    
+    Args:
+        x: Initial positions [batch, dim]
+        v: Initial velocities [batch, dim]
+        f: Force sequence [batch, seq_len, dim]
+        R: Major radius of torus
+        r: Minor radius of torus
+        dt: Time step
+        batch: Batch size
+        seq_len: Sequence length
+        dim: Dimension (must be even for toroidal pairs)
+        hysteresis_state: Optional hysteresis state
+        
+    Returns:
+        Tuple of (x_final, v_final, x_seq, reg_loss, h_state)
+    """
+    device = x.device
+    dtype = x.dtype
+    
+    # Initialize output sequences
+    x_seq = []
+    x_curr = x.clone()
+    v_curr = v.clone()
+    
+    # Process sequence
+    for t in range(seq_len):
+        force_t = f[:, t]  # [batch, dim]
+        
+        # Leapfrog integration for toroidal manifold
+        # Half-step velocity update
+        v_half = v_curr + 0.5 * dt * force_t
+        
+        # Position update with toroidal Christoffel correction
+        x_new = x_curr + dt * v_half
+        
+        # Apply toroidal boundary conditions using atan2
+        # This ensures smooth gradients through the wrapping
+        x_new = torch.atan2(torch.sin(x_new), torch.cos(x_new))
+        
+        # Compute toroidal Christoffel symbols at new position
+        gamma = torch.zeros_like(x_new)
+        for i in range(0, dim, 2):  # Process pairs (θ, φ)
+            if i + 1 < dim:
+                theta = x_new[:, i]
+                phi = x_new[:, i + 1]
+                v_theta = v_half[:, i]
+                v_phi = v_half[:, i + 1]
+                
+                # Metric coefficient: g_φφ = (R + r*cos(θ))²
+                cos_theta = torch.cos(theta)
+                denom = torch.clamp(R + r * cos_theta, min=1e-6)
+                
+                # Γ^θ_φφ = (R + r*cos(θ)) * sin(θ) / r
+                sin_theta = torch.sin(theta)
+                gamma_theta = denom * sin_theta / (r + 1e-6) * (v_phi * v_phi)
+                
+                # Γ^φ_θφ = -r*sin(θ) / (R + r*cos(θ))
+                gamma_phi = -(r * sin_theta) / (denom + 1e-6) * 2.0 * v_theta * v_phi
+                
+                gamma[:, i] = gamma_theta
+                gamma[:, i + 1] = gamma_phi
+        
+        # Clamp Christoffel forces
+        gamma = torch.clamp(gamma, -10.0, 10.0)
+        
+        # Final velocity update with Christoffel correction
+        v_new = v_half + 0.5 * dt * (force_t - gamma)
+        
+        # Update state
+        x_curr = x_new
+        v_curr = v_new
+        
+        x_seq.append(x_curr)
+    
+    # Stack sequence
+    x_seq = torch.stack(x_seq, dim=1)  # [batch, seq_len, dim]
+    
+    # Return final state and sequence
+    reg_loss = torch.tensor(0.0, device=device, dtype=dtype)
+    h_state = hysteresis_state if hysteresis_state is not None else torch.empty(0, device=device, dtype=dtype)
+    
+    return x_curr, v_curr, x_seq, reg_loss, h_state

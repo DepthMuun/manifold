@@ -36,7 +36,25 @@ class HeunIntegrator(nn.Module):
                     R = getattr(self.christoffel, 'R', 2.0)
                     r = getattr(self.christoffel, 'r', 1.0)
                     
-                    return heun_fused(x, v, force, U, W, self.dt, dt_scale, steps=steps, topology=topology, R=R, r=r)
+                    # Friction gate parameters
+                    fg = getattr(self.christoffel, 'forget_gate', None)
+                    W_forget = fg.weight if fg is not None else torch.empty(0, device=x.device)
+                    b_forget = fg.bias if (fg is not None and fg.bias is not None) else torch.empty(0, device=x.device)
+                    
+                    ig = getattr(self.christoffel, 'input_gate', None)
+                    W_input = ig.weight if ig is not None else torch.empty(0, device=x.device)
+                    
+                    # Active inference parameters
+                    plasticity = getattr(self.christoffel, 'plasticity', 0.0)
+                    sing_thresh = getattr(self.christoffel, 'semantic_certainty_threshold', 1.0)
+                    sing_strength = getattr(self.christoffel, 'curvature_amplification_factor', 1.0)
+                    
+                    return heun_fused(
+                        x, v, force, U, W, self.dt, dt_scale, steps=steps, topology=topology,
+                        W_forget=W_forget, b_forget=b_forget,
+                        plasticity=plasticity, sing_thresh=sing_thresh, sing_strength=sing_strength,
+                        R=R, r=r, W_input=W_input
+                    )
             except Exception:
                 pass
 

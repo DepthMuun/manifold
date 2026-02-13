@@ -45,6 +45,10 @@ class CUDAFusionManager:
             return False
         if self.model.integrator_type not in ['heun', 'leapfrog']:
             return False
+        if self.model.training:
+            cuda_cfg = self.model.physics_config.get('cuda_fusion', {})
+            if not cuda_cfg.get('allow_fused_training', False):
+                return False
         
         # Check CUDA availability
         try:
@@ -345,11 +349,38 @@ class CUDAFusionManager:
             
             if params.get('is_torus', False):
                 if self.model.training:
-                    return None
+                    # Use autograd-compatible toroidal integration during training
+                    try:
+                        from ..cuda.autograd import toroidal_leapfrog_fused_autograd
+                        
+                        result = toroidal_leapfrog_fused_autograd(
+                            x=x, v=v, f=forces * mask,
+                            R=params['major_R'],
+                            r=params['minor_r'],
+                            dt=params['base_dt'],
+                            batch=x.shape[0],
+                            seq_len=forces.shape[1],
+                            dim=x.shape[1],
+                            hysteresis_state=hysteresis_state
+                        )
+                        
+                        if result is not None:
+                            return result
+                        else:
+                            warnings.warn("[GFN:WARN] Toroidal autograd failed, falling back to CUDA kernel")
+                            
+                    except ImportError:
+                        warnings.warn("[GFN:WARN] Toroidal autograd not available, falling back to CUDA kernel")
+                
+                # Try CUDA kernel for inference or as fallback
                 try:
                     from ..cuda.ops import launch_toroidal_leapfrog_fused
                     
-                    # Call dedicated toroidal kernel
+                    # Call dedicated toroidal kernel with learned friction
+                    # Extract first head's friction weights for the kernel
+                    W_f_head0 = params['W_f_stack'][0] if params['W_f_stack'].numel() > 0 else None
+                    b_f_head0 = params['b_f_stack'][0] if params['b_f_stack'].numel() > 0 else None
+                    
                     result = launch_toroidal_leapfrog_fused(
                         x=x, v=v, f=forces * mask,
                         R=params['major_R'],
@@ -358,7 +389,9 @@ class CUDAFusionManager:
                         batch=x.shape[0],
                         seq_len=forces.shape[1],
                         dim=x.shape[1],
-                        hysteresis_state=hysteresis_state
+                        hysteresis_state=hysteresis_state,
+                        W_forget=W_f_head0,
+                        b_forget=b_f_head0
                     )
                     
                     if result is not None:
@@ -382,10 +415,8 @@ class CUDAFusionManager:
             if forget_rates.numel() == 1:
                 forget_rates = forget_rates.expand(self.model.heads)
             
-            # Choose between training (autograd) and inference path
-            func = recurrent_manifold_fused_autograd if self.model.training else recurrent_manifold_fused
-            
-            res = func(
+            # Usar kernel recurrente fusionado también en train para reducir lanzamientos
+            res = recurrent_manifold_fused(
                 x=x, v=v, f=forces * mask,
                 U_stack=params['U_stack'], W_stack=params['W_stack'],
                 dt=params['base_dt'], dt_scales=dt_scales, forget_rates=forget_rates,
@@ -412,11 +443,6 @@ class CUDAFusionManager:
                 gate_W2=params['gate_W2'],
                 gate_b2=params['gate_b2'],
                 integrator_type=1 if self.model.integrator_type == 'leapfrog' else 0,
-                # Integrator type mapping for CUDA kernel:
-                # 0 = Heun (default)
-                # 1 = Leapfrog
-                # Note: Other integrators (rk4, euler, etc.) fall back to Python loop
-                # --- NEW HYSTERESIS PARAMETERS ---
                 hysteresis_state=hysteresis_state,
                 hyst_update_w=hyst_update_w,
                 hyst_update_b=hyst_update_b,
@@ -425,9 +451,7 @@ class CUDAFusionManager:
                 hyst_decay=hyst_decay,
                 hyst_enabled=hyst_enabled
             )
-            
             if res is not None:
-                # res is (x_final, v_final, x_seq, reg_loss, new_h_state)
                 return res
             return None
             

@@ -37,7 +37,7 @@ def run_tests(cpu_only: bool = False, verbose: bool = False, output: str = None)
         "-v",
         "--tb=short",
         "-x",  # Stop on first failure
-        "tests/test_cuda_python_consistency.py"
+        "tests/cuda/test_cuda_python_consistency.py"
     ]
     
     if verbose:

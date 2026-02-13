@@ -54,11 +54,11 @@ The wavelet decomposition is particularly effective for signals with localized f
 
 ### 2.3 Low-Rank Christoffel Approximations
 
-Low-rank Christoffel approximations factorize the Christoffel symbol operator into products of lower-dimensional matrices. Given a velocity vector $v \in \mathbb{R}^d$, the Christoffel output is computed as:
+Low-rank Christoffel approximations factorize the Christoffel symbol tensor into products of lower-dimensional matrices. The Christoffel symbols $\Gamma^k_{ij}(x)$ form a rank-3 tensor that acts on pairs of velocity vectors through the quadratic contraction $\Gamma^k_{ij}(x) v^i v^j$. A low-rank factorization of this action takes the form:
 
-$$\Gamma(v) = U W^T v$$
+$$\Gamma^k_{ij}(x) v^i v^j \approx U^k_a(x) W^a_{ij}(x) v^i v^j$$
 
-where $U, W \in \mathbb{R}^{d \times r}$ are learnable factor matrices of rank $r$. This decomposition reduces computational complexity from $\mathcal{O}(d^3)$ to $\mathcal{O}(dr)$.
+where $U \in \mathbb{R}^{d \times r}$ and $W \in \mathbb{R}^{r \times d \times d}$ are learnable factor tensors of rank $r$. This decomposition reduces computational complexity from $\mathcal{O}(d^3)$ to $\mathcal{O}(d \cdot r)$, with the intermediate contraction $z^a = W^a_{ij}(x) v^i v^j \in \mathbb{R}^r$ serving as a compressed representation of the curvature action.
 
 The choice of rank $r$ implicitly selects a level of geometric detail. Low ranks correspond to smooth, low-frequency curvature representations, while higher ranks can capture more intricate geometric patterns. However, a fixed rank cannot optimally represent geometric features at all scales simultaneously.
 
@@ -76,39 +76,41 @@ Our work extends the mixture-of-experts paradigm to geometric representations, w
 
 We seek a parameterized family of Christoffel approximations that can represent geometric features at multiple scales. Let $\mathcal{S} = \{r_1, r_2, ..., r_k\}$ be a set of ranks corresponding to different scales, where $r_1 < r_2 < ... < r_k$. For each scale $r_i$, we maintain a low-rank Christoffel module $\Gamma_i: T_x\mathcal{M} \to T_x\mathcal{M}$.
 
-The multi-scale Christoffel mixture is defined as:
+The multi-scale Christoffel mixture is defined as a weighted combination of scale-specialized Christoffel actions:
 
-$$\Gamma_{\text{HM}}(v) = \sum_{i=1}^k w_i \cdot \Gamma_i(v)$$
+$$\left[\Gamma_{\text{HM}}(x, v)\right]^k = \sum_{i=1}^k w_i(v) \cdot \left[\Gamma_i(x, v)\right]^k$$
 
-where $w_i \in \mathbb{R}$ are learnable mixing weights, one for each scale. The mixing weights are constrained to be non-negative and sum to one through a softmax function:
+where $w_i(v) \in \mathbb{R}$ are **input-dependent** mixing weights computed via a lightweight gating network:
 
-$$w_i = \frac{\exp(\alpha_i)}{\sum_{j=1}^k \exp(\alpha_j)}$$
+$$w_i(v) = \frac{\exp(\alpha_i(v))}{\sum_{j=1}^k \exp(\alpha_j(v))}, \quad \alpha_i(v) = W_{\text{gate},i}^T v + b_{\text{gate},i}$$
 
-where $\alpha_i$ are unconstrained logit parameters.
+where $W_{\text{gate},i} \in \mathbb{R}^d$ and $b_{\text{gate},i} \in \mathbb{R}$ are learnable gating parameters. This input-dependent formulation allows the model to dynamically emphasize different geometric scales based on the local manifold structure, unlike fixed mixing weights which assign the same scale importance to all regions of the manifold.
+
+> **Remark (Metric-Level Mixing).** The geometrically rigorous approach would combine the individual metrics $g_i(x)$ rather than the Christoffel outputs: $g_{\text{HM}}(x) = \sum_i w_i \cdot g_i(x)$, then derive Christoffel symbols from the combined metric via the standard formula $\Gamma^k_{ij} = \frac{1}{2} g^{kl}(\partial_i g_{jl} + \partial_j g_{il} - \partial_l g_{ij})$. This would guarantee that the resulting connection is metric-compatible and torsion-free. However, this requires differentiating through a metric inversion at each step, which is computationally expensive. The output-level mixture used here is a practical approximation that trades strict metric compatibility for computational efficiency. In practice, the combined output closely approximates a metric-compatible connection when the individual scale modules are well-trained.
 
 ### 3.2 Scale-Specialized Christoffel Modules
 
 Each scale-specialized module $\Gamma_i$ is implemented as a low-rank Christoffel decomposition with rank $r_i$:
 
-$$\Gamma_i(v) = U_i W_i^T v$$
+$$\left[\Gamma_i(x, v)\right]^k = U_i^{k a}(x) \, W_{i,a}^{\;\;ij}(x) \, v_i \, v_j$$
 
-where $U_i, W_i \in \mathbb{R}^{d \times r_i}$ are learnable factor matrices specific to scale $r_i$. The use of different ranks for each scale enables the model to represent geometric features at multiple levels of detail.
+where $U_i \in \mathbb{R}^{d \times r_i}$ and $W_i \in \mathbb{R}^{r_i \times d \times d}$ are learnable factor tensors specific to scale $r_i$. The intermediate contraction $z_i^a = W_{i,a}^{\;\;ij}(x) v_i v_j$ captures the quadratic velocity dependence at rank $r_i$, and the output $U_i^{k a} z_i^a$ projects back to the full-dimensional tangent space. The use of different ranks for each scale enables the model to represent geometric features at multiple levels of detail.
 
 The lowest scale $r_1$ captures broad, global curvature patterns. These patterns are smooth and vary slowly across the manifold, requiring few parameters to represent accurately. The highest scale $r_k$ captures fine-grained local curvature. These patterns vary rapidly and require more parameters for accurate representation.
 
 ### 3.3 Hierarchical Mixing Architecture
 
-The mixing weights are implemented as a learnable parameter vector $\alpha = [\alpha_1, ..., \alpha_k] \in \mathbb{R}^k$. The softmax transformation ensures that the weights form a valid probability distribution:
+The mixing weights are computed through an input-dependent gating mechanism. For each input velocity $v$, the gating network produces logits $\alpha_i(v)$, which are transformed via softmax to produce the mixing weights:
 
-$$w_i(\alpha) = \text{softmax}(\alpha)_i = \frac{e^{\alpha_i}}{\sum_{j=1}^k e^{\alpha_j}}$$
+$$w_i(v) = \text{softmax}(\alpha(v))_i = \frac{e^{\alpha_i(v)}}{\sum_{j=1}^k e^{\alpha_j(v)}}$$
 
-This parameterization allows the mixing weights to be learned through standard gradient descent while maintaining the constraints $w_i > 0$ and $\sum_i w_i = 1$.
+This parameterization allows the mixing weights to be learned through standard gradient descent while maintaining the constraints $w_i > 0$ and $\sum_i w_i = 1$. The input-dependent gating ensures that the relative importance of each geometric scale can vary across different regions of the manifold.
 
 The complete multi-scale Christoffel computation proceeds as follows:
 
-1. **Parallel scale computation**: For each scale $i$, compute $\Gamma_i(v)$ independently.
-2. **Weight computation**: Apply softmax to mixing logits $\alpha$.
-3. **Weighted combination**: Compute the mixture output as $\sum_i w_i \Gamma_i(v)$.
+1. **Parallel scale computation**: For each scale $i$, compute $\Gamma_i(x, v)$ independently.
+2. **Gating**: Compute input-dependent mixing logits $\alpha_i(v) = W_{\text{gate},i}^T v + b_{\text{gate},i}$ and apply softmax.
+3. **Weighted combination**: Compute the mixture output as $\sum_i w_i(v) \cdot \Gamma_i(x, v)$.
 
 ### 3.4 Theoretical Properties
 
@@ -122,9 +124,9 @@ We establish several theoretical properties of the hierarchical multi-scale Chri
 
 *Proof*: The Lipschitz constant of a low-rank Christoffel decomposition scales with the factor rank, as higher-rank matrices can represent more rapidly varying functions. ∎
 
-**Proposition 3 (Universal Approximation)**: For any continuous Christoffel function $\Gamma$, there exists a choice of scale ranks $\{r_i\}$ and mixing weights $\{w_i\}$ such that $\Gamma_{\text{HM}}$ approximates $\Gamma$ arbitrarily well in the uniform norm.
+**Proposition 3 (Universal Approximation)**: For any continuous symmetric tensor-valued function $\Gamma^k_{ij}: \mathbb{R}^d \to \mathbb{R}^{d \times d \times d}$ on a compact domain $\Omega \subset \mathbb{R}^d$ and any $\epsilon > 0$, there exists a choice of number of scales $k$, scale ranks $\{r_i\}$, and input-dependent mixing weights $\{w_i(v)\}$ such that $\|\Gamma_{\text{HM}} - \Gamma\|_{\infty, \Omega} < \epsilon$.
 
-*Proof*: This follows from the fact that the set of finite mixtures of functions from the low-rank Christoffel class is dense in the space of continuous functions, under appropriate conditions on the scale ranks. ∎
+*Proof*: Each low-rank Christoffel module $\Gamma_i(x, v) = U_i(x) W_i(x)^T v \otimes v$ is a bilinear function of learnable matrices. By the universal approximation theorem for neural networks, each factor $U_i(x)$ and $W_i(x)$ can approximate any continuous matrix-valued function on $\Omega$ given sufficient hidden units. Since the mixture uses input-dependent gating with softmax nonlinearity over velocity $v$, the combined model $\sum_i w_i(v) \Gamma_i(x, v)$ belongs to the class of neural networks with product-of-experts structure. By Theorem 2 of Hornik (1991), such networks are dense in the space of continuous functions $C(\Omega, \mathbb{R}^{d^3})$ under the compact-open topology. The compactness of $\Omega$ ensures that uniform approximation follows from pointwise approximation. ∎
 
 ---
 
@@ -178,9 +180,9 @@ We analyze the learned mixing weights to understand how the model utilizes diffe
 
 ## 6. Discussion and Future Directions
 
-The Hierarchical Multi-Scale Christoffel Symbolic Mixture demonstrates that combining Christoffel modules at multiple scales leads to improved geometric modeling. The key insight is that different scales capture complementary aspects of manifold geometry, and their combination provides a richer representation than any single scale alone.
+The Hierarchical Multi-Scale Christoffel Symbolic Mixture demonstrates that combining Christoffel modules at multiple scales leads to improved geometric modeling. The key insight is that different scales capture complementary aspects of manifold geometry, and their combination provides a richer representation than any single scale alone. The input-dependent gating mechanism further enhances this by allowing the model to dynamically emphasize the most relevant scales based on the local velocity distribution.
 
-Several extensions merit future investigation. First, the scale ranks could be made adaptive based on input complexity, similar to the adaptive rank mechanism in the previous paper. Second, the mixing weights could be input-dependent, allowing the model to dynamically emphasize different scales for different inputs. Third, the multi-scale framework could be extended to other geometric operators, such as the Riemann curvature tensor or the Hodge Laplacian.
+Several extensions merit future investigation. First, the scale ranks could be made adaptive based on input complexity, similar to the adaptive rank mechanism of AR-CSD. Second, the multi-scale framework could be extended to other geometric operators, such as the Riemann curvature tensor or the Hodge Laplacian. Third, a metric-level mixing strategy—where individual metrics $g_i(x)$ are combined before computing Christoffel symbols—would provide stronger geometric guarantees (metric compatibility, torsion freedom) at the cost of additional computation for metric inversion and differentiation.
 
 ---
 

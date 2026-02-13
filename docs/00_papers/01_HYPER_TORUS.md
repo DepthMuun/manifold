@@ -70,7 +70,7 @@ Here:
 
 For the diagonal torus metric, the non-zero Christoffel symbols for each $(\theta, \phi)$ block are:
 $$
-\Gamma^\theta_{\phi\phi} = \frac{(R + r\cos\theta) \, (-r\sin\theta)}{r^2} = -\frac{(R + r\cos\theta)\sin\theta}{r},
+\Gamma^\theta_{\phi\phi} = \frac{(R + r\cos\theta) \, (-r\sin\theta)}{r^2} = +\frac{(R + r\cos\theta)\sin\theta}{r},
 $$
 $$
 \Gamma^\phi_{\theta\phi} = \Gamma^\phi_{\phi\theta} = \frac{r\sin\theta}{R + r\cos\theta}.

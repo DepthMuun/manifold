@@ -98,25 +98,43 @@ $$R_p(v) = \text{atan2}(\sin(p + v), \cos(p + v))$$
 
 This operation wraps the sum onto the periodic domain while preserving differentiability.
 
-**Cayley Retraction (Orthogonal constraints)**: For orthogonal matrices, the Cayley retraction uses the Cayley transform:
+**Cayley Retraction (Orthogonal constraints)**: For orthogonal matrices, the Cayley retraction uses the Cayley transform. The tangent vector $v$ must first be projected onto the skew-symmetric (antisymmetric) tangent space at the identity:
 
-$$R_p(v) = \left(I - \frac{1}{2}v\right)\left(I + \frac{1}{2}v\right)^{-1} p$$
+$$V_{\text{skew}} = \frac{1}{2}(vP^T - Pv^T)$$
 
-This retraction maps skew-symmetric tangent vectors to orthogonal matrices.
+The retraction is then:
+
+$$R_P(V_{\text{skew}}) = \left(I - \frac{1}{2}V_{\text{skew}}\right)\left(I + \frac{1}{2}V_{\text{skew}}\right)^{-1} P$$
+
+> **Remark.** Applying the Cayley transform to a tangent vector that is not skew-symmetric will produce a matrix that is not orthogonal. The antisymmetric projection step is essential for preserving the orthogonality constraint. This correction is particularly important when the raw gradient $v$ comes from automatic differentiation in the ambient space, where it has no reason to be skew-symmetric.
 
 ### 3.3 Vector Transport Implementation
 
 The implementation of vector transport depends on the specific retraction type. For normalized retraction, vector transport is approximated by projecting the vector onto the orthogonal complement of the new parameter point. This projection-based transport provides a computationally efficient approximation of parallel transport on the sphere.
 
-For toroidal retraction, parallel transport is trivial since the torus has zero curvature. The manifold is locally flat, and the Levi-Civita connection reduces to the standard Euclidean connection. Therefore, vector transport is simply the identity operation, preserving the vector components without modification.
+**Toroidal transport.** For the canonical flat torus $\mathbb{T}^d = (\mathbb{R}/2\pi\mathbb{Z})^d$ with the standard Euclidean metric inherited from $\mathbb{R}^d$, parallel transport is the identity operation because the Christoffel symbols vanish identically. However, **for tori equipped with learned non-flat metrics** $g(x)$, the Levi-Civita connection is non-trivial and parallel transport must account for the Christoffel symbols of the learned metric. In this case, vector transport is approximated by first-order parallel transport:
 
-For Cayley retraction, we employ the same projection-based approximation as used for normalized retraction. The orthogonality constraints on the manifold require careful handling of the tangent space structure, and the projection method provides a balance between computational efficiency and geometric accuracy.
+$$\mathcal{T}_{p \to q}(\xi) \approx \xi^k - \Gamma^k_{ij}(p)(q - p)^i \xi^j$$
+
+where the difference $(q - p)$ is computed modulo the periodic boundary conditions. When the metric is close to Euclidean (which is the case early in training), this correction is small, ensuring smooth transition from the trivial transport used during initialization.
+
+For Cayley retraction, we employ the differential of the Cayley map to transport tangent vectors. Given the retraction curve $\gamma(t) = \text{Cay}(tV_{\text{skew}})P$, the transported vector is computed as:
+
+$$\mathcal{T}_{P \to P'}(\xi) = \left(I - \frac{1}{2}V_{\text{skew}}\right)\left(I + \frac{1}{2}V_{\text{skew}}\right)^{-1} \xi$$
+
+which preserves the skew-symmetric structure of the tangent space at orthogonal matrices.
 
 ### 3.4 Weight Decay Handling
 
-Weight decay must be adapted for manifold constraints. For normalized retraction, weight decay is applied before retraction, ensuring that the magnitude constraint is maintained throughout the optimization process. The decay is applied as a multiplicative scaling of the parameter vector.
+Weight decay must be adapted for manifold constraints. Standard Euclidean weight decay $p \leftarrow (1 - \lambda) p$ pushes parameters toward the origin, which is generally not a point on the manifold. The geometrically correct weight decay should push parameters toward a reference point $p_{\text{ref}}$ on the manifold along the geodesic connecting the current parameter to the reference:
 
-For toroidal retraction, we apply smooth decay that avoids discontinuities at boundaries. The periodic nature of the parameter space requires careful treatment to ensure that the decay operation does not introduce artifacts near the boundary points. This is achieved through trigonometric operations that respect the circular topology of the manifold.
+$$\text{decay}_k = \lambda \cdot \nabla_{p^k} d_{\mathcal{M}}(p, p_{\text{ref}})^2 = 2\lambda \cdot \exp_{p}^{-1}(p_{\text{ref}})^k$$
+
+where $d_{\mathcal{M}}$ is the geodesic distance and $\exp_p^{-1}$ is the logarithmic map. This decay term is added to the gradient in the tangent space before retraction.
+
+For **normalized retraction** (sphere), the reference point is typically a fixed point on the sphere (e.g., the north pole), and geodesic weight decay corresponds to a great-circle pull toward that reference.
+
+For **toroidal retraction**, geodesic weight decay wraps around the periodic domain correctly, avoiding the boundary artifacts that arise from naïve Euclidean decay.
 
 ---
 

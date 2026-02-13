@@ -82,7 +82,7 @@ class TestGeodesicRegularization:
     
     def test_basic_regularization(self):
         """Test basic regularization computation."""
-christoffels = [torch.randn(2, 64) for _ in range(5)]
+        christoffels = [torch.randn(2, 64) for _ in range(5)]
         velocities = [torch.randn(2, 64) for _ in range(5)]
         
         # AUDIT FIX: Correct argument order

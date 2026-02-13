@@ -110,19 +110,23 @@ $$r(v) = \text{clamp}\left( \left\lfloor \rho(v) \cdot R_{\max} \right\rfloor, r
 
 where $r_{\min} = 4$ is a minimum rank threshold ensuring numerical stability, and $\text{clamp}(\cdot)$ enforces the rank bounds.
 
+> **Remark (Differentiability).** The floor function $\lfloor \cdot \rfloor$ is piecewise constant and has zero gradient almost everywhere. During training, we employ a **straight-through estimator** (STE): in the forward pass, the discrete rank $r(v)$ is used for factor slicing; in the backward pass, the gradient is passed through the continuous rank ratio $\rho(v)$ as if the floor operation were the identity. This preserves end-to-end differentiability while maintaining the computational benefits of discrete rank selection during inference.
+
 The Christoffel symbol output is computed through the following sequence of operations:
 
 1. **Factor slicing**: Extract the effective factors $U = U_{\text{full}}[:, :r]$ and $W = W_{\text{full}}[:, :r]$.
-2. **Quadratic contraction**: Compute the low-dimensional contraction $z_a = W^a_{ij} v^i v^j \in \mathbb{R}^r$.
+2. **Quadratic contraction**: Compute the low-dimensional contraction $z_a = W^a_{ij}(x) v^i v^j \in \mathbb{R}^r$.
 3. **Normalization**: Apply scale normalization to prevent gradient explosion:
 
 $$\tilde{z}_a = z_a \cdot \frac{1}{1 + \|z\|_2 + \epsilon}$$
 
+> **Remark (Normalization).** The ideal covariantly correct normalization would use the manifold metric: $\tilde{z}_a = z_a / \sqrt{g^{ab} z_a z_b + \epsilon}$. The simplified $L_2$ normalization above is used as a practical approximation that avoids the computational cost of metric evaluation while achieving comparable gradient stability in practice.
+
 4. **Christoffel output**: Compute the final output through the second factor:
 
-$$\Gamma(v)^k = U^k_a \tilde{z}^a$$
+$$\Gamma(v)^k = U^k_a(x) \tilde{z}^a$$
 
-where $\cdot$ denotes matrix multiplication and $\epsilon$ is a small constant preventing division by zero.
+where $\cdot$ denotes matrix multiplication and $\epsilon$ is a small constant preventing division by zero. Note that both $U(x)$ and $W(x)$ depend on the position $x$ through their learned parameterization, preserving the fundamental geometric property that Christoffel symbols are functions of position on the manifold.
 
 ### 3.4 Theoretical Properties
 
@@ -132,9 +136,9 @@ We now establish several theoretical properties of the adaptive rank Christoffel
 
 *Proof*: From the definition of $r(v) = \text{clamp}(\lfloor(0.1 + 0.9\mathcal{C}_\phi(v)) \cdot R_{\max}\rfloor, r_{\min}, R_{\max})$, it follows directly that $\mathcal{C}_\phi(v_1) \leq \mathcal{C}_\phi(v_2)$ implies $r(v_1) \leq r(v_2)$ for any $v_1, v_2$. ∎
 
-**Proposition 2 (Continuity)**: The Christoffel output $\Gamma_\theta(v)$ is continuous with respect to $v$.
+**Proposition 2 (Piecewise Continuity)**: The Christoffel output $\Gamma_\theta(v)$ is piecewise continuous with respect to $v$, with discontinuities only at the rank transition boundaries.
 
-*Proof*: The complexity predictor $\mathcal{C}_\phi$ is continuous as a composition of continuous functions. The slicing operation selecting the first $r$ columns is piecewise constant, but the Christoffel computation involves products of projections that depend continuously on $r$ through the normalized projections. Combined with the clamping operation, the overall mapping is continuous. ∎
+*Proof*: The complexity predictor $\mathcal{C}_\phi$ is continuous as a composition of continuous functions. However, the slicing operation $U_{\text{full}}[:, :r]$ is piecewise constant in $r$, introducing discontinuities at the rank boundaries $\rho(v) \cdot R_{\max} \in \mathbb{Z}$. Within each rank regime (where $r(v)$ is constant), the Christoffel output is continuous because it is a composition of continuous operations (quadratic contraction, normalization, and linear projection). At rank transition boundaries, the output may exhibit a jump proportional to the contribution of the newly included (or excluded) rank component $U^k_{r+1} \tilde{z}^{r+1}$. In practice, the normalization layer and the smooth decay of components with increasing rank index mitigate these discontinuities. During training, the straight-through estimator ensures smooth gradient flow across rank boundaries. ∎
 
 **Proposition 3 (Complexity Efficiency)**: For inputs with geometric complexity $\kappa(v) \propto \|v\|_2$, the expected computational cost is bounded by:
 
@@ -232,4 +236,10 @@ The total complexity is dominated by $\mathcal{O}(d \cdot r)$, which is the same
 
 ## Appendix B: Gradient Flow Analysis
 
-The gradient flow through the adaptive rank mechanism is analyzed. The rank function $r(v)$ is piecewise constant, which could in principle cause issues with gradient-based optimization. However, the Christoffel computation involves smooth functions of the sliced factors that are continuous with respect to the slicing boundary. Empirically, we observe stable training dynamics without the need for gradient approximation techniques such as straight-through estimators.
+The gradient flow through the adaptive rank mechanism requires careful treatment. The rank function $r(v)$ is piecewise constant, with zero gradient almost everywhere. To enable end-to-end training, we employ a **straight-through estimator** (STE): during the backward pass, we treat the floor operation as the identity, allowing gradients to flow through the continuous rank ratio $\rho(v)$ to the complexity predictor parameters $\phi$. The STE introduces a bias in the gradient estimate, but this bias is bounded by the rank granularity $1/R_{\max}$ and diminishes as the number of available ranks increases.
+
+Formally, the STE gradient for the rank selection is:
+
+$$\frac{\partial \mathcal{L}}{\partial \phi} \approx \frac{\partial \mathcal{L}}{\partial \Gamma} \cdot \frac{\partial \Gamma}{\partial r} \cdot R_{\max} \cdot \frac{\partial \rho}{\partial \phi}$$
+
+where $\frac{\partial \Gamma}{\partial r}$ is computed as if $r$ were a continuous variable. Empirically, we observe stable training dynamics with this approach, consistent with the success of STE in other discrete optimization settings (e.g., quantized neural networks).

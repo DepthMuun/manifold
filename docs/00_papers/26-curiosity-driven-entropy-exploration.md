@@ -60,7 +60,11 @@ Differential entropy extends discrete entropy to continuous distributions. For a
 
 $$h(X) = -\int p(x) \log p(x) \, dx$$
 
-Unlike discrete entropy, differential entropy can be negative, and it is not invariant to coordinate transformations. Nevertheless, maximizing differential entropy encourages spread-out distributions.
+Unlike discrete entropy, differential entropy can be negative, and it is **not invariant to coordinate transformations**. Under a diffeomorphism $\phi: x \mapsto y$, the density transforms as $p_Y(y) = p_X(\phi^{-1}(y)) |\det J_{\phi^{-1}}(y)|$, and the entropy changes by $\mathbb{E}[\log|\det J_\phi|]$. In the context of Riemannian manifolds, the coordinate-invariant generalization uses the volume form $\sqrt{\det g(x)}$:
+
+$$h_g(X) = -\int p(x) \log \frac{p(x)}{\sqrt{\det g(x)}} \sqrt{\det g(x)} \, d^d x$$
+
+This **Riemannian differential entropy** is invariant under coordinate transformations and reduces to the standard differential entropy when $g = I$. In practice, the Euclidean entropy is used as an approximation, which is valid when the metric is close to the identity or when the coordinate system is fixed.
 
 ---
 
@@ -74,17 +78,21 @@ Let $V = \{v_0, v_1, ..., v_T\}$ be the collection of velocity vectors across al
 
 ### 3.2 Entropy Proxy
 
-Computing the true differential entropy of the velocity distribution is intractable. Instead, we use an entropy proxy inspired by the entropy of a Gaussian distribution. For a $d$-dimensional Gaussian with covariance $\Sigma$, the entropy is:
+Computing the true differential entropy of the velocity distribution is intractable. Instead, we use an entropy proxy inspired by the entropy of a multivariate Gaussian distribution. For a $d$-dimensional Gaussian with full covariance matrix $\Sigma$, the entropy is:
 
-$$h = \frac{1}{2} \log\left((2\pi e)^d \det \Sigma\right)$$
+$$h = \frac{d}{2} \log(2\pi e) + \frac{1}{2} \log \det \Sigma$$
 
-The term $\frac{1}{2}\log\det\Sigma$ is a sufficient statistic for entropy under Gaussian assumptions. We use this as our entropy proxy:
+We use the log-determinant of the empirical covariance as our entropy proxy:
 
 $$S(V) = \frac{1}{2}\log\det(\Sigma(V) + \epsilon I)$$
 
-where $\Sigma(V)$ is the empirical covariance of the velocity vectors across the minibatch and $\epsilon$ is a small constant for numerical stability. For diagonal covariance $\Sigma=\mathrm{diag}(\sigma_1^2,\dots,\sigma_d^2)$, this reduces to:
+where $\Sigma(V)$ is the **full** empirical covariance matrix of the velocity vectors across the minibatch and $\epsilon$ is a small constant for numerical stability. This captures both the variance along each dimension **and** the correlations between dimensions.
 
-$$S(V)=\frac{1}{2}\sum_{j=1}^d \log(\sigma_j(V)^2+\epsilon)$$
+> **Remark (Diagonal Approximation).** In practice, computing the full $d \times d$ covariance matrix and its determinant has $\mathcal{O}(d^3)$ cost. A computationally cheaper diagonal approximation uses only per-dimension variances:
+>
+> $$S_{\text{diag}}(V) = \frac{1}{2} \sum_{j=1}^d \log(\sigma_j(V)^2 + \epsilon)$$
+>
+> By **Hadamard's inequality**, $\det \Sigma \leq \prod_j \sigma_j^2$ with equality if and only if $\Sigma$ is diagonal. Therefore $S_{\text{diag}}(V) \geq S(V)$ always, meaning the diagonal proxy **overestimates** the true entropy when velocity components are correlated. This overestimation can lead to the regularizer believing the velocity distribution is more diverse than it actually is. We recommend using the full covariance when $d \leq 128$ and the diagonal approximation for higher dimensions, with periodic logging of the off-diagonal correlation magnitude to monitor the approximation quality.
 
 ### 3.3 Curiosity Loss
 
@@ -112,9 +120,9 @@ where $\mathcal{L}_{\text{task}}$ is the primary task loss (e.g., classification
 
 *Proof*: Mode collapse corresponds to low variance in the velocity distribution. The entropy regularizer penalizes low variance, forcing the model to maintain diverse velocity trajectories. ∎
 
-**Proposition 3 (Thermodynamic Interpretation)**: The CDEE loss corresponds to maximizing the entropy of an isolated system in thermal equilibrium.
+**Proposition 3 (Thermodynamic Analogy)**: The CDEE loss is *analogous to* (but not equivalent to) entropy maximization in statistical mechanics.
 
-*Proof*: The velocity distribution can be interpreted as the microstates of a thermodynamic system. Maximizing entropy corresponds to the second law of thermodynamics, which states that isolated systems evolve toward maximum entropy states. ∎
+*Proof sketch*: In statistical mechanics, the second law states that an isolated system evolves toward macrostates of maximum Boltzmann entropy $S = k_B \ln \Omega$, where $\Omega$ is the number of accessible microstates. The CDEE entropy proxy $S(V ) = \frac{1}{2} \log \det \Sigma$ is analogous in that it measures the "volume" of the velocity distribution in phase space. However, the analogy has important limitations: (1) the neural network system is not isolated—it is driven by the task loss $\mathcal{L}_{\text{task}}$; (2) the velocity distribution is not in thermal equilibrium; (3) the entropy proxy is computed over a minibatch, not an ensemble average. Despite these differences, the analogy provides useful intuition: CDEE encourages the velocity distribution to "spread out" in phase space, analogous to how a gas expands to fill its container. ∎
 
 ---
 

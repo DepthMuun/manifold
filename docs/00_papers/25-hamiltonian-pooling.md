@@ -6,7 +6,7 @@
 
 ## Abstract
 
-We present Hamiltonian Pooling (H-Pool), a physics-grounded aggregation mechanism for sequence representations in geodesic flow networks. Standard pooling operations such as mean, max, and attention-weighted sum treat all tokens equally or rely on learned attention mechanisms without explicit physical motivation. H-Pool takes a fundamentally different approach by computing the total Hamiltonian energy (kinetic plus potential) of each token and using this energy as the weighting factor for aggregation. The physical intuition is that high-energy states are more "important" in dynamical systems—they represent configurations with strong interactions and significant force application. We derive the pooling mechanism from Hamiltonian mechanics, showing that energy-weighted aggregation naturally emerges from the principle of stationary action. Our implementation computes kinetic energy from velocity vectors using a learnable Riemannian metric and potential energy from position vectors using a simple quadratic form. The resulting attention weights are proportional to the exponential of the Hamiltonian energy, implementing a Boltzmann distribution over token energies. Experiments on sequence modeling and graph representation tasks demonstrate that H-Pool provides interpretable attention patterns and improved performance compared to learned attention mechanisms.
+We present Hamiltonian Pooling (H-Pool), a physics-grounded aggregation mechanism for sequence representations in geodesic flow networks. Standard pooling operations such as mean, max, and attention-weighted sum treat all tokens equally or rely on learned attention mechanisms without explicit physical motivation. H-Pool takes a fundamentally different approach by computing the total Hamiltonian energy (kinetic plus potential) of each token and using this energy as the weighting factor for aggregation. The physical intuition is that tokens in equilibrium (low-energy states) represent stable, well-formed configurations that should anchor the representation, while high-energy states correspond to transient dynamics. We derive the pooling mechanism from Hamiltonian mechanics, showing that energy-weighted aggregation naturally emerges from the Boltzmann distribution, where low-energy configurations are exponentially preferred. Our implementation computes kinetic energy from velocity vectors using a learnable Riemannian metric and potential energy from position vectors using a learnable quadratic form. The resulting attention weights follow a Boltzmann distribution $\alpha_i \propto \exp(-H_i / T)$ over token energies, favoring low-energy tokens. Experiments on sequence modeling and graph representation tasks demonstrate that H-Pool provides interpretable attention patterns and improved performance compared to learned attention mechanisms.
 
 **Keywords:** Hamiltonian mechanics, pooling, attention, energy-based models, Riemannian metric, kinetic energy, potential energy, geodesic flow networks, sequence aggregation
 
@@ -43,6 +43,8 @@ For a particle of mass $m$ moving in a potential $V(q)$, the Hamiltonian is:
 $$H = \frac{p^2}{2m} + V(q)$$
 
 The first term is kinetic energy $K = p^2/2m$ and the second term is potential energy $U = V(q)$. Conservation of energy implies that $H$ is constant along trajectories.
+
+> **Remark (Momentum vs. Velocity).** In Riemannian geometry, the conjugate momentum $p$ and velocity $v$ are related by the metric tensor $g$: $p_i = g_{ij} v^j$. This is the **Legendre transform** connecting the Lagrangian formulation (in terms of $(q, v)$) to the Hamiltonian formulation (in terms of $(q, p)$). In the special case where $g = I$ (Euclidean space), $p = v$ and the distinction vanishes. In geodesic flow networks with learned metrics $g \neq I$, the kinetic energy should properly be written as $K = \frac{1}{2} g^{ij} p_i p_j = \frac{1}{2} g_{ij} v^i v^j$. Both forms are equivalent but express the energy in different canonical variables. Our implementation works in the Lagrangian picture with $(x, v)$ and computes kinetic energy via the metric-weighted velocity form $K = \frac{1}{2} v^T g v$.
 
 ### 2.2 Pooling Operations in Deep Learning
 
@@ -98,11 +100,13 @@ $$K_i = \frac{1}{2} \sum_j g_{jj} v_{ij}^2$$
 
 The metric $g$ can be learned or fixed. In our implementation, we use a learnable diagonal metric for flexibility.
 
-**Potential Energy**: For a position vector $x_i$, we use a simple quadratic potential:
+**Potential Energy**: For a position vector $x_i$, we compute potential energy using a learnable Riemannian potential:
 
-$$U_i = \frac{1}{2} \|x_i\|^2$$
+$$U_i = \frac{1}{2} x_i^T G_U x_i$$
 
-This choice is motivated by the harmonic oscillator potential, which has desirable properties including bounded energy levels and analytical tractability.
+where $G_U$ is a learnable positive-definite matrix parameterized as $G_U = L L^T + \epsilon I$ with $L$ being a lower-triangular learnable matrix. When $G_U = I$, this reduces to the simple Euclidean norm $\frac{1}{2}\|x_i\|^2$ (harmonic oscillator potential). The learned potential allows the model to identify anisotropic energy landscapes where certain position dimensions contribute more to the potential energy than others.
+
+> **Remark.** The Euclidean potential $U = \frac{1}{2}\|x\|^2$ is not invariant under Riemannian coordinate changes. The covariantly correct formulation would use the geodesic distance from a reference point: $U(x) = \frac{1}{2} d_{\mathcal{M}}(x, x_0)^2$. The learnable quadratic form $G_U$ provides a practical middle ground that captures anisotropy without the computational cost of geodesic distance computation.
 
 ### 3.3 Boltzmann Attention Weights
 
@@ -110,9 +114,9 @@ Given the Hamiltonian energies $H_i$, we compute attention weights through a sof
 
 $$\alpha_i = \frac{\exp(-H_i / T)}{\sum_j \exp(-H_j / T)}$$
 
-where $T > 0$ is a temperature parameter. This implements a Boltzmann distribution over token energies, giving higher weight to lower-energy states.
+where $T > 0$ is a temperature parameter. This implements a **Boltzmann distribution** over token energies, giving **higher weight to lower-energy states**.
 
-Note the sign convention: lower energy corresponds to higher weight. This is consistent with energy-based models where low-energy configurations are preferred. High-energy states (high kinetic or potential energy) contribute less to the aggregate.
+> **Sign Convention.** The negative sign $\exp(-H/T)$ is consistent with the Boltzmann distribution in statistical mechanics, where low-energy configurations are exponentially more probable. In the context of H-Pool, this means that tokens in equilibrium-like states (low kinetic energy = moving slowly, low potential energy = near the reference configuration) are weighted most heavily. The physical motivation is that stable, well-formed representations correspond to low-energy equilibria on the manifold, while high-energy states represent transient dynamics or noise. This is analogous to how proteins fold to their minimum energy state, or how physical systems settle into equilibrium.
 
 ### 3.4 Aggregation Formula
 
@@ -205,7 +209,7 @@ The key advantage of H-Pool is its physical grounding. Rather than learning atte
 
 ### 6.2 Limitations
 
-The quadratic potential $U = \frac{1}{2}\|x\|^2$ may not capture all semantic relationships. More complex potential functions could be learned, though this would increase the risk of overfitting.
+The learnable potential $U = \frac{1}{2} x^T G_U x$ is a quadratic approximation that may not capture all semantic relationships. More complex potential functions (e.g., neural network potentials) could be learned, though this would increase the risk of overfitting and lose the analytical tractability of the quadratic form. Additionally, the Euclidean structure of the potential does not fully respect the Riemannian geometry of the manifold; a geodesic distance-based potential would be more principled but computationally expensive.
 
 ### 6.3 Future Directions
 
