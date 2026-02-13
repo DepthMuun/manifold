@@ -336,17 +336,9 @@ class Manifold(nn.Module):
                 # Force for current timestep
                 force = all_forces[:, t] * mask[:, t]
                 
-                # --- Hysteresis: Apply Ghost Force (Self-Gravity) ---
-                # AUDIT WARNING (2026-02-06):
-                # This ghost force does NOT derive from a potential energy function.
-                # Energy conservation is VIOLATED when hysteresis is enabled.
-                if self.hysteresis_enabled:
-                    f_ghost = self.hysteresis_readout(hysteresis_state)
-                    force = force + f_ghost
-                
                 # Evolve state through layers
                 for layer in self.layers:
-                    x, v, context, layer_christoffels = layer(x, v, force, context, collect_christ=collect_christ)
+                    x, v, context, layer_christoffels = layer(x, v, force, context, collect_christ=collect_christ, memory_state=hysteresis_state)
                     if collect_christ:
                         all_christoffels.extend(layer_christoffels) 
                 

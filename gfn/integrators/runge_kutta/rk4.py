@@ -39,11 +39,18 @@ class RK4Integrator(nn.Module):
                 pass
 
         curr_x, curr_v = x, v
+        christ_out = None
+        
         for _ in range(steps):
             dt = self.dt * dt_scale
             
-            def dynamics(current_x, current_v):
-                acc = -self.christoffel(current_v, current_x, force=force, **kwargs)
+            def dynamics(current_x, current_v, is_first=False):
+                nonlocal christ_out
+                c_out = self.christoffel(current_v, current_x, force=force, **kwargs)
+                if is_first and christ_out is None:
+                    christ_out = c_out
+                
+                acc = -c_out
                 if force is not None:
                     acc = acc + force
                 return acc
@@ -55,7 +62,7 @@ class RK4Integrator(nn.Module):
                 
             # k1
             dx1 = curr_v
-            dv1 = dynamics(curr_x, curr_v)
+            dv1 = dynamics(curr_x, curr_v, is_first=True)
             
             # k2
             v2 = curr_v + 0.5 * dt * dv1
@@ -80,4 +87,6 @@ class RK4Integrator(nn.Module):
             curr_x = apply_boundary_python(curr_x, topo_id)
             curr_v = curr_v + (dt / 6.0) * (dv1 + 2*dv2 + 2*dv3 + dv4)
         
+        if collect_christ:
+            return curr_x, curr_v, christ_out
         return curr_x, curr_v

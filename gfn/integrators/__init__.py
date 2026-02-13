@@ -5,6 +5,7 @@ from .symplectic import (
     YoshidaIntegrator,
     ForestRuthIntegrator,
     OmelyanIntegrator,
+    PEFRLIntegrator,
     CouplingFlowIntegrator,
 )
 

@@ -4,6 +4,7 @@ from .hyper import HyperChristoffel
 from .analytical import EuclideanChristoffel, HyperbolicChristoffel, SphericalChristoffel
 from .toroidal import ToroidalChristoffel
 from .gauge import GaugeChristoffel, gauge_invariant_loss
+from .hysteresis import HysteresisChristoffel
 from ..integrators import HeunIntegrator, LeapfrogIntegrator, DormandPrinceIntegrator, EulerIntegrator
 import torch
 import torch.nn as nn

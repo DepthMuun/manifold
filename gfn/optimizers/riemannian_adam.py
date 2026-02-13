@@ -86,47 +86,74 @@ class RiemannianAdam(Optimizer):
                        retraction=retraction, max_norm=max_norm, topology=topology)
         super().__init__(params, defaults)
     
-    def _vector_transport(self, x_old, x_new, vec, retraction):
+    def _project_tangent(self, p, grad, retraction):
+        """
+        Project ambient gradient onto the tangent space of the manifold at p.
+        """
+        if retraction == 'euclidean':
+            return grad
+            
+        if retraction == 'normalize':
+            # Project out component parallel to p (Sphere tangent space)
+            norm_sq = torch.sum(p * p, dim=-1, keepdim=True) + 1e-8
+            projection = torch.sum(grad * p, dim=-1, keepdim=True) / norm_sq
+            return grad - projection * p
+            
+        if retraction == 'cayley':
+            # Project 2D matrices onto skew-symmetric space
+            if p.dim() == 2 and p.shape[0] == p.shape[1]:
+                return 0.5 * (grad - grad.transpose(-1, -2))
+            return grad
+            
+        return grad
+
+    def _vector_transport(self, x_old, x_new, vec, retraction, group):
         """
         Transport vector from old tangent space to new tangent space.
         
-        For torus topology (retraction='torus'), this is identity (trivial connection).
-        For other topologies, uses projection-based transport.
-        
         Args:
-            x_old: Old parameter values [*, dim]
-            x_new: New parameter values [*, dim]
-            vec: Vector to transport [*, dim]
-            retraction: Type of retraction being used
-            
-        Returns:
-            Transported vector in T_x_new M
+            x_old: Old parameter values
+            x_new: New parameter values
+            vec: Vector to transport
+            retraction: Type of retraction
+            group: Parameter group (contains physics info)
         """
-        if retraction == 'torus' or retraction == 'euclidean':
-            # For torus, parallel transport is identity (flat connection)
-            # For euclidean, no transport needed
+        if retraction == 'euclidean':
             return vec
         
-        # For normalize retraction, project to orthogonal complement
-        # This is an approximation of parallel transport
+        # Torus transport (Paper 23): Christoffel-aware if metric is learned
+        if retraction == 'torus':
+            # For non-flat torus, use delta_xi^k = -Gamma^k_ij * delta_x^i * xi^j
+            # We approximate this using a learned or fixed connection if available
+            # If no connection info, falls back to identity (flat connection)
+            christoffel = group.get('christoffel', None)
+            if christoffel is not None:
+                delta_x = x_new - x_old
+                # Wrap delta_x for periodic boundary
+                PI = 3.14159265359
+                delta_x = torch.atan2(torch.sin(delta_x), torch.cos(delta_x))
+                
+                # Correction: xi_new = xi_old - Gamma(xi_old, delta_x)
+                with torch.no_grad():
+                    gamma_term = christoffel(vec, delta_x)
+                    return vec - gamma_term
+            return vec
+        
         if retraction == 'normalize':
-            norm = x_new.norm(dim=-1, keepdim=True)
-            # Project out component parallel to x_new
-            projection = torch.sum(vec * x_new, dim=-1, keepdim=True) / (norm.pow(2) + 1e-8)
+            norm = x_new.norm(dim=-1, keepdim=True) + 1e-8
+            projection = torch.sum(vec * x_new, dim=-1, keepdim=True) / norm.pow(2)
             return vec - projection * x_new
         
-        # Default: no transport
+        if retraction == 'cayley':
+            # For Cayley, transport is often identity if using skew-symmetric projection
+            # but we can apply a rotational correction if needed.
+            return vec
+            
         return vec
     
     def step(self, closure=None):
         """
-        Performs a single optimization step with Riemannian retraction.
-        
-        Args:
-            closure: Optional closure to reevaluate the model
-            
-        Returns:
-            loss: Optional loss value if closure is provided
+        Performs a single optimization step with Riemannian retraction and tangent projection.
         """
         loss = None
         if closure is not None:
@@ -145,11 +172,20 @@ class RiemannianAdam(Optimizer):
                 if p.grad is None:
                     continue
                 
-                grad = p.grad.data
+                # 1. Project gradient onto tangent space
+                grad = self._project_tangent(p.data, p.grad.data, retraction)
                 
-                # Apply weight decay (decoupled, like AdamW)
-                if weight_decay != 0 and retraction != 'torus':
-                    p.data.mul_(1 - lr * weight_decay)
+                # 2. Geodesic Weight Decay (Paper 23)
+                # Apply pull toward the "origin" in the manifold's own distance metric
+                if weight_decay != 0:
+                    if retraction == 'torus':
+                        # Pull phase toward zero geodesically
+                        grad.add_(p.data, alpha=weight_decay) # Simple linear pull for torus
+                    elif retraction == 'cayley':
+                        # No Euclidean decay for orthogonal matrices (compact manifold)
+                        pass
+                    else:
+                        p.data.mul_(1 - lr * weight_decay)
                 
                 # Get state
                 state = self.state[p]
@@ -163,98 +199,59 @@ class RiemannianAdam(Optimizer):
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
                 state['step'] += 1
                 
-                # Update biased first moment estimate
+                # 3. Update moments (standard Adam)
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                
-                # Update biased second raw moment estimate
                 exp_avg_sq.mul_(beta2).add_(grad * grad, alpha=1 - beta2)
                 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
                 
-                corrected_exp_avg = exp_avg / bias_correction1
-                corrected_exp_avg_sq = exp_avg_sq / bias_correction2
+                step_size = lr / bias_correction1
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
                 
-                # Compute step direction (standard Adam)
-                denom = corrected_exp_avg_sq.sqrt().add_(eps)
-                step_direction = corrected_exp_avg / denom
+                step_direction = exp_avg / denom
                 
-                # === RIEMANNIAN RETRACTION ===
-                # Instead of p = p - lr * step, we use a retraction
+                # 4. Retraction and Transport
+                old_p = p.data.clone()
                 
                 if retraction == 'euclidean':
-                    # Standard Euclidean update (fallback) - no Riemannian benefits
-                    # AUDIT FIX: This is equivalent to AdamW but with overhead
-                    # Only use for debugging or comparison
-                    p.data.add_(step_direction, alpha=-lr)
-                    
+                    p.data.add_(step_direction, alpha=-step_size)
+                
                 elif retraction == 'normalize':
-                    # Normalize retraction: keep weight matrices bounded
-                    # AUDIT FIX: Apply transport to moment estimates
-                    old_p = p.data.clone()
-                    p.data.add_(step_direction, alpha=-lr)
-                    
-                    # Transport moment estimates to new position
-                    exp_avg = self._vector_transport(old_p, p.data, exp_avg, retraction)
-                    exp_avg_sq = self._vector_transport(old_p, p.data, exp_avg_sq, retraction)
+                    p.data.add_(step_direction, alpha=-step_size)
                     
                     # Project back to bounded manifold
                     norm = p.data.norm()
                     if norm > max_norm:
                         p.data.mul_(max_norm / norm)
+                    
+                    # Transport moments to new position
+                    state['exp_avg'] = self._vector_transport(old_p, p.data, exp_avg, retraction, group)
                 
                 elif retraction == 'torus':
-                    # AUDIT FIX: Improved torus retraction with proper weight decay
-                    state = self.state[p]
-                    if 'phase' not in state:
-                        state['phase'] = p.data.clone()
+                    # Phase update with wrapping
+                    p.data.add_(step_direction, alpha=-step_size)
+                    p.data.copy_(torch.atan2(torch.sin(p.data), torch.cos(p.data)))
                     
-                    phase = state['phase']
-                    
-                    # Apply step
-                    phase.add_(step_direction, alpha=-lr)
-                    
-                    # Apply weight decay properly (no discontinuity)
-                    if weight_decay != 0:
-                        # Smooth decay avoiding boundary issues
-                        phase = phase * (1.0 - lr * weight_decay)
-                    
-                    # AUDIT FIX: Wrap to [-π, π] smoothly with atan2
-                    # This preserves differentiable gradients at boundaries
-                    p.data.copy_(torch.atan2(torch.sin(phase), torch.cos(phase)))
-                    
-                    # Update stored phase
-                    state['phase'] = p.data.clone()
+                    # Transport momentum for curvature
+                    state['exp_avg'] = self._vector_transport(old_p, p.data, exp_avg, retraction, group)
                         
                 elif retraction == 'cayley':
-                    # AUDIT FIX: Cayley retraction with orthogonalization
-                    old_p = p.data.clone()
-                    p.data.add_(step_direction, alpha=-lr)
-                    
-                    # Transport moments
-                    exp_avg = self._vector_transport(old_p, p.data, exp_avg, retraction)
-                    exp_avg_sq = self._vector_transport(old_p, p.data, exp_avg_sq, retraction)
-                    
-                    # For 2D weight matrices, optionally orthogonalize
+                    # Cayley retraction for orthogonal matrices
+                    # V is already skew-symmetric due to project_tangent
+                    V = -step_direction * step_size
                     if p.dim() == 2 and p.shape[0] == p.shape[1]:
-                        # Approximate orthogonalization via SVD
-                        try:
-                            U, S, Vh = torch.linalg.svd(p.data, full_matrices=False)
-                            p.data.copy_(U @ Vh)
-                        except RuntimeError:
-                            pass
-                        except Exception as e:
-                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                                raise
-                            else:
-                                print(f"Warning: SVD orthogonalization failed: {e}")
+                        I = torch.eye(p.shape[0], device=p.device)
+                        # R = (I - V/2)(I + V/2)^-1
+                        retraction_matrix = torch.linalg.solve(I + V/2, I - V/2)
+                        p.data.copy_(retraction_matrix @ p.data)
                     else:
-                        # For non-square, just normalize
+                        p.data.add_(step_direction, alpha=-step_size)
                         norm = p.data.norm()
                         if norm > max_norm:
                             p.data.mul_(max_norm / norm)
-                            
+                
                 else:
                     # Unknown retraction, use Euclidean
                     p.data.add_(step_direction, alpha=-lr)

@@ -18,9 +18,11 @@ from ..geometry.confusion import ConfusionChristoffel
 from ..geometry.thermo import ThermodynamicChristoffel
 from ..geometry.holographic import AdSCFTChristoffel
 from ..geometry.ricci import RicciFlowChristoffel
+from ..geometry.hysteresis import HysteresisChristoffel
 from ..integrators.adaptive import AdaptiveIntegrator
 from ..integrators.stochastic import StochasticIntegrator
 from ..noise.geometric import GeometricNoise
+from ..noise.curiosity import CuriosityNoise
 
 class MLayer(nn.Module):
     """
@@ -155,6 +157,14 @@ class MLayer(nn.Module):
             ricci_cfg = self.physics_config.get('active_inference', {}).get('ricci_flow', {})
             if ricci_cfg.get('enabled', False):
                 christoffel_map[i] = RicciFlowChristoffel(christoffel_map[i], lr=ricci_cfg.get('lr', 0.001))
+            
+            # 4. Hysteresis Memory (Paper 19) - Trajectory Deformation
+            hyst_cfg = self.physics_config.get('hysteresis', {})
+            if hyst_cfg.get('enabled', False):
+                self.hysteresis_enabled = True
+                christoffel_map[i] = HysteresisChristoffel(christoffel_map[i], self.head_dim, rank=hyst_cfg.get('rank', 16))
+            else:
+                self.hysteresis_enabled = False
                 
             self.christoffels.append(christoffel_map[i])
             
@@ -227,6 +237,8 @@ class MLayer(nn.Module):
                 integ = ForestRuthIntegrator(self.christoffels[i], dt=self.base_dt)
             elif integrator_type == 'omelyan':
                 integ = OmelyanIntegrator(self.christoffels[i], dt=self.base_dt)
+            elif integrator_type == 'pefrl':
+                integ = PEFRLIntegrator(self.christoffels[i], dt=self.base_dt)
             elif integrator_type == 'coupling':
                 integ = CouplingFlowIntegrator(self.christoffels[i], dt=self.base_dt)
             elif integrator_type == 'neural':
@@ -246,6 +258,19 @@ class MLayer(nn.Module):
                     tolerance=tolerance, 
                     max_depth=max_depth
                 )
+
+        # 4. Curiosity Noise (Paper 26)
+        curiosity_cfg = self.physics_config.get('active_inference', {}).get('curiosity_noise', {})
+        if curiosity_cfg.get('enabled', False):
+            self.curiosity_noises = nn.ModuleList([
+                CuriosityNoise(
+                    self.head_dim, 
+                    base_std=curiosity_cfg.get('base_std', 0.01),
+                    sensitivity=curiosity_cfg.get('sensitivity', 1.0)
+                ) for _ in range(heads)
+            ])
+        else:
+            self.curiosity_noises = None
             
         # Wrap with Stochastic Integrator if enabled (Paper 16)
         stochastic_cfg = self.physics_config.get('active_inference', {}).get('stochastic_geometry', {})
@@ -278,26 +303,33 @@ class MLayer(nn.Module):
             self.context_proj = nn.Linear(heads, dim)
             nn.init.zeros_(self.context_proj.weight)
             
-    def forward(self, x, v, force=None, context=None, collect_christ=False):
+    def forward(self, x, v, force=None, context=None, collect_christ=False, memory_state=None):
         """
-        Vectorized forward for all heads via tensor batching.
+        Args:
+            x: Position [Batch, Dim]
+            v: Velocity [Batch, Dim]
+            force: Input force F [Batch, Dim]
+            context: Optional previous scale context
+            collect_christ: Whether to return Christoffel outputs
+            memory_state: Accumulated hysteresis state [Batch, Dim]
         """
         batch = x.shape[0]
         
-        # Hidden states are passed raw to preserve periodicity
-        # x_heads = x.view(batch, self.heads, self.head_dim).transpose(0, 1)
-        # v_heads = v.view(batch, self.heads, self.head_dim).transpose(0, 1)
+        # 1. Split into Heads
+        x_heads = x.view(batch, self.heads, self.head_dim).unbind(dim=1)
+        v_heads = v.view(batch, self.heads, self.head_dim).unbind(dim=1)
         
-        # Split heads
-        x_heads = x.view(batch, self.heads, self.head_dim).permute(1, 0, 2).contiguous() # [H, B, D]
-        v_heads = v.view(batch, self.heads, self.head_dim).permute(1, 0, 2).contiguous()
-        
+        if memory_state is not None:
+            m_heads = memory_state.view(batch, self.heads, self.head_dim).unbind(dim=1)
+        else:
+            m_heads = [None] * self.heads
+
         if force is not None:
              if self.use_recursive and context is not None:
                  force = force + self.context_proj(context)
-             f_heads = force.view(batch, self.heads, self.head_dim).permute(1, 0, 2).contiguous()
+             f_heads = force.view(batch, self.heads, self.head_dim).unbind(dim=1)
         else:
-             f_heads = torch.zeros_like(x_heads)
+             f_heads = [None] * self.heads
              
         # 3. Vectorized Gating [Heads, Batch, 1]
         dt_base = torch.nn.functional.softplus(self.dt_params).view(self.heads, 1, 1)
@@ -381,11 +413,22 @@ class MLayer(nn.Module):
                 'W_input_stack': W_input_stack[i:i+1],
                 'b_forget_stack': b_forget_stack[i:i+1],
                 'topology': self.topology_id,
-                'collect_christ': collect_christ
+                'collect_christ': collect_christ,
+                'memory_state': m_heads[i]
             }
             
-            xh, vh = self.integrators[i](x_heads[i], v_heads[i], force=f_heads[i], dt_scale=scale[i], **extra_kwargs)
+            res = self.integrators[i](x_heads[i], v_heads[i], force=f_heads[i], dt_scale=scale[i], **extra_kwargs)
             
+            if collect_christ:
+                xh, vh, ch_out = res
+                christoffel_outputs.append(ch_out)
+            else:
+                xh, vh = res
+            
+            # --- Proactive Curiosity Exploration (Paper 26) ---
+            if self.curiosity_noises is not None:
+                vh = self.curiosity_noises[i](vh, force=f_heads[i], training=self.training)
+
             x_outs.append(xh)
             v_outs.append(vh)
 

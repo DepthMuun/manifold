@@ -59,12 +59,19 @@ class HeunIntegrator(nn.Module):
                 pass
 
         curr_x, curr_v = x, v
+        christ_out = None
+        
         for _ in range(steps):
             dt = self.dt * dt_scale
             
-            def dynamics(current_x, current_v):
+            def dynamics(current_x, current_v, is_first=False):
                 # LEVEL 25: CLUTCH CONNECTION
-                acc = -self.christoffel(current_v, current_x, force=force, **kwargs)
+                nonlocal christ_out
+                c_out = self.christoffel(current_v, current_x, force=force, **kwargs)
+                if is_first and christ_out is None:
+                    christ_out = c_out
+                
+                acc = -c_out
                 if force is not None:
                     acc = acc + force
                 return acc
@@ -76,7 +83,7 @@ class HeunIntegrator(nn.Module):
 
             # k1
             dx1 = curr_v
-            dv1 = dynamics(curr_x, curr_v)
+            dv1 = dynamics(curr_x, curr_v, is_first=True)
             
             # Predictor step (Euler)
             v_pred = curr_v + dt * dv1
@@ -93,4 +100,6 @@ class HeunIntegrator(nn.Module):
             # Apply Boundary (Torus)
             curr_x = apply_boundary_python(curr_x, topo_id)
         
+        if collect_christ:
+            return curr_x, curr_v, christ_out
         return curr_x, curr_v

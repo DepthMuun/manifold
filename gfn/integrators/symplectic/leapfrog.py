@@ -127,6 +127,8 @@ class LeapfrogIntegrator(nn.Module):
                 # Fall through to PyTorch implementation
 
         curr_x, curr_v = x, v
+        christ_out = None
+        
         # Tell Christoffel to return friction separately for implicit update
         was_separate = getattr(self.christoffel, 'return_friction_separately', False)
         self.christoffel.return_friction_separately = True
@@ -137,7 +139,7 @@ class LeapfrogIntegrator(nn.Module):
              topology_id = 1
         
         try:
-            for _ in range(steps):
+            for i in range(steps):
                 effective_dt = self.dt * dt_scale
                 h = 0.5 * effective_dt
                 
@@ -150,6 +152,10 @@ class LeapfrogIntegrator(nn.Module):
                 else:
                     gamma, mu = res, 0.0  # Fallback
                 
+                if i == 0:
+                    # Capture Gamma for Noether
+                    christ_out = gamma
+
                 # Get friction from gate if needed
                 Wf = kwargs.get('W_forget_stack', None)
                 bf = kwargs.get('b_forget_stack', None)
@@ -198,4 +204,6 @@ class LeapfrogIntegrator(nn.Module):
         finally:
             self.christoffel.return_friction_separately = was_separate
         
+        if collect_christ:
+            return curr_x, curr_v, christ_out
         return curr_x, curr_v

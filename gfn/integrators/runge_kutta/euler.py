@@ -43,10 +43,16 @@ class EulerIntegrator(nn.Module):
                 # Fall through to PyTorch implementation
 
         curr_x, curr_v = x, v
-        for _ in range(steps):
+        christ_out = None
+        
+        for i in range(steps):
             dt = self.dt * dt_scale
             
-            acc = -self.christoffel(curr_v, curr_x, force=force, **kwargs)
+            c_out = self.christoffel(curr_v, curr_x, force=force, **kwargs)
+            if i == 0:
+                christ_out = c_out
+                
+            acc = -c_out
             if force is not None:
                 acc = acc + force
                 
@@ -59,4 +65,6 @@ class EulerIntegrator(nn.Module):
                  topo_id = 1
             curr_x = apply_boundary_python(curr_x, topo_id)
         
+        if collect_christ:
+            return curr_x, curr_v, christ_out
         return curr_x, curr_v

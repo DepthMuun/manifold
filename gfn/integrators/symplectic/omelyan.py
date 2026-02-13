@@ -65,9 +65,16 @@ class OmelyanIntegrator(nn.Module):
 
         # Python Implementation
         curr_x, curr_v = x, v
+        christ_out = None
+        
         for _ in range(steps):
-            def acceleration(tx, tv):
-                 a = -self.christoffel(tv, tx, force=force, **kwargs)
+            def acceleration(tx, tv, is_first=False):
+                 nonlocal christ_out
+                 c_out = self.christoffel(tv, tx, force=force, **kwargs)
+                 if is_first and christ_out is None:
+                     christ_out = c_out
+                 
+                 a = -c_out
                  if force is not None:
                      a = a + force
                  return a
@@ -75,7 +82,7 @@ class OmelyanIntegrator(nn.Module):
             # Level 25: Stage-wise Wrapping
             # Step 1
             x1 = apply_boundary_python(curr_x + self.c1 * dt * curr_v, topo_id)
-            v1 = curr_v + self.d1 * dt * acceleration(x1, curr_v)
+            v1 = curr_v + self.d1 * dt * acceleration(x1, curr_v, is_first=True)
             
             # Step 2
             x2 = apply_boundary_python(x1 + self.c2 * dt * v1, topo_id)
@@ -91,6 +98,7 @@ class OmelyanIntegrator(nn.Module):
             
             # Step 5 (Final Drift)
             curr_x = apply_boundary_python(x4 + self.c5 * dt * v4, topo_id)
-            curr_v = v4 + self.d4 * dt * acceleration(curr_x, v4)
             
-        return curr_x, curr_v
+        if collect_christ:
+            return curr_x, v4, christ_out
+        return curr_x, v4
