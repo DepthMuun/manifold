@@ -1,4 +1,4 @@
-﻿"""
+"""
 Quick test to verify CUDA fusion is active.
 Run this before the benchmark to confirm optimizations are working.
 """

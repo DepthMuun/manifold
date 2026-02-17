@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gfn.model import Manifold
-from tests.benchmarks.bench_utils import ResultsLogger, ParityTask
+from tests.benchmarks.infra.utils import ResultsLogger, ParityTask
 
 def plot_phase_portrait(history, logger, step_name):
     """

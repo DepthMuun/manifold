@@ -37,17 +37,19 @@ class AdSCFTChristoffel(nn.Module):
         Computes the radial coordinate z and its gradient w.r.t x.
         """
         x_req = x.detach().requires_grad_(True)
-        z = self.radial_net(x_req) + self.z_min
-        z = torch.clamp(z, max=self.z_max)
-        
-        # Compute grad(z)
-        grad_z = torch.autograd.grad(
-            z.sum(), x_req, 
-            create_graph=self.training, 
-            retain_graph=True
-        )[0]
+        with torch.enable_grad():
+            z = self.radial_net(x_req) + self.z_min
+            z = torch.clamp(z, max=self.z_max)
+            
+            # Compute grad(z)
+            grad_z = torch.autograd.grad(
+                z.sum(), x_req, 
+                create_graph=self.training, 
+                retain_graph=True
+            )[0]
         
         return z, grad_z
+
 
     def forward(self, v, x, **kwargs):
         # 1. Base Geometry (Optional)

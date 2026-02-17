@@ -24,6 +24,8 @@ from ..integrators.stochastic import StochasticIntegrator
 from ..noise.geometric import GeometricNoise
 from ..noise.curiosity import CuriosityNoise
 
+from ..geometry.boundaries import apply_boundary_python
+
 class MLayer(nn.Module):
     """
     Manifold Layer (M-Layer):
@@ -364,41 +366,126 @@ class MLayer(nn.Module):
         
         # Clutch parameter stacking for the kernel
         
-        W_f_list = []
-        W_i_list = []
-        b_f_list = []
-        
-        for i in range(self.heads):
-            # weight: [Out, In]
-            head_geo = self.christoffels[i]
+        # 4. Batched Parameter Stacking (Optimized for speed)
+        # We cache the stacked weights if we aren't in a mode that needs re-stacking
+        if not hasattr(self, '_W_f_stacked') or self.training:
+            W_forget_stack = torch.stack([
+                (c.forget_gate.weight if hasattr(c, 'forget_gate') else self.friction_gates[i].weight[:, :2*self.head_dim if self.topology_id == 1 else self.head_dim])
+                for i, c in enumerate(self.christoffels)
+            ], dim=0).contiguous()
+            W_input_stack = torch.stack([
+                (c.input_gate.weight if hasattr(c, 'input_gate') else self.friction_gates[i].weight[:, 2*self.head_dim if self.topology_id == 1 else self.head_dim:])
+                for i, c in enumerate(self.christoffels)
+            ], dim=0).contiguous()
+            b_forget_stack = torch.stack([
+                (c.forget_gate.bias if hasattr(c, 'forget_gate') else self.friction_gates[i].bias)
+                for i, c in enumerate(self.christoffels)
+            ], dim=0).contiguous()
             
-            if hasattr(head_geo, 'forget_gate') and hasattr(head_geo, 'input_gate'):
-                # Separate state and force gates
-                W_f_list.append(head_geo.forget_gate.weight)
-                W_i_list.append(head_geo.input_gate.weight)
-                b_f_list.append(head_geo.forget_gate.bias)
-            else:
-                # Legacy/combined gate
-                w = self.friction_gates[i].weight
-                b = self.friction_gates[i].bias
-                d = self.head_dim
-                
-                if self.topology_id == 1:
-                    # W_forget = [D, 2D] (sin, cos)
-                    # W_input = [D, D] (force)
-                    W_f_list.append(w[:, :2*d])
-                    W_i_list.append(w[:, 2*d:])
-                else:
-                    W_f_list.append(w[:, :d])
-                    W_i_list.append(w[:, d:])
-                b_f_list.append(b)
-        
-        # W_forget_stack is [H, D, 2D] for torus
-        W_forget_stack = torch.stack(W_f_list, dim=0).contiguous()
-        W_input_stack = torch.stack(W_i_list, dim=0).contiguous() 
-        b_forget_stack = torch.stack(b_f_list, dim=0).contiguous()
+            self._W_f_stacked = W_forget_stack
+            self._W_i_stacked = W_input_stack
+            self._b_f_stacked = b_forget_stack
+        else:
+            W_forget_stack = self._W_f_stacked
+            W_input_stack = self._W_i_stacked
+            b_forget_stack = self._b_f_stacked
 
-        # Batched geodesic step
+        # 4. Batched geodesic step
+        # --- NEW: Fused CUDA Path Detection ---
+        # Detect if we can fuse Thermodynamic/Holographic into the kernel
+        t_alpha, t_temp = 0.0, 1.0
+        h_z_list, h_gz_list = [], []
+        
+        can_fuse_geo = True
+        actual_christoffels = []
+        head_dim = self.dim // self.heads
+        for i, c in enumerate(self.christoffels):
+            curr = c
+            # Unwrap known wrappers
+            while hasattr(curr, 'base_christoffel'):
+                if isinstance(curr, (ThermodynamicChristoffel, AdSCFTChristoffel)):
+                    if isinstance(curr, ThermodynamicChristoffel):
+                        t_alpha = curr.alpha
+                        t_temp = curr.temperature.item()
+                    elif isinstance(curr, AdSCFTChristoffel):
+                        # Slice x for this head
+                        x_h = x[:, i*head_dim : (i+1)*head_dim]
+                        hz, hgz = curr.get_z_and_grad(x_h)
+                        h_z_list.append(hz)
+                        h_gz_list.append(hgz)
+                curr = curr.base_christoffel
+
+            
+            if hasattr(curr, 'is_wrapped'):
+                can_fuse_geo = False
+                break
+            actual_christoffels.append(curr)
+
+        use_fused = (
+            not collect_christ and 
+            self.curiosity_noises is None and
+            not self.use_recursive and
+            can_fuse_geo
+        )
+        
+        if use_fused:
+            try:
+                from gfn.cuda.ops import recurrent_manifold_fused
+                
+                # We need U_stack and W_stack [H * head_dim, rank]
+                u_list = [c.U.weight for c in actual_christoffels]
+                w_list = [c.W.weight for c in actual_christoffels]
+                u_stack = torch.cat(u_list, dim=0)
+                w_stack = torch.cat(w_list, dim=0)
+                
+                # dt_scales: [H]
+                dt_scales = torch.nn.functional.softplus(self.dt_params)
+                
+                # Prepare AdS tensors [B, H] and [B, H, Dh]
+                h_z_ten = torch.cat(h_z_list, dim=1) if h_z_list else None
+                h_gz_ten = torch.stack(h_gz_list, dim=1) if h_gz_list else None
+
+                # Prepare Singularity Vectors (V_w)
+                v_w_list = []
+                for c in actual_christoffels:
+                    if hasattr(c, 'V') and hasattr(c, 'active_cfg') and c.active_cfg.get('singularities', {}).get('enabled', False):
+                        v_w_list.append(c.V.weight.view(-1))
+                    else:
+                        # Dummy zeros matching feature dim
+                        dim_v = (2 * self.head_dim) if (self.topology_id == 1) else self.head_dim
+                        v_w_list.append(torch.zeros(dim_v, device=x.device, dtype=x.dtype))
+                V_w_stack = torch.cat(v_w_list, dim=0)
+
+                if not use_gating:
+                    res = recurrent_manifold_fused(
+                        x=x, v=v, f=force.unsqueeze(1),
+                        U_stack=u_stack, W_stack=w_stack,
+                        dt=self.base_dt, dt_scales=dt_scales,
+                        forget_rates=None, num_heads=self.heads,
+                        topology=self.topology_id,
+                        Wf=W_forget_stack.view(-1, W_forget_stack.shape[-1]) if Wf is not None else None,
+                        Wi=W_input_stack.view(-1, W_input_stack.shape[-1]) if Wi is not None else None,
+                        bf=b_forget_stack.view(-1) if bf is not None else None,
+                        V_w=V_w_stack,
+                        hysteresis_state=memory_state,
+                        hyst_enabled=self.hysteresis_enabled,
+                        thermo_alpha=t_alpha,
+                        thermo_temp=t_temp,
+                        holographic_z=h_z_ten,
+                        holographic_grad_z=h_gz_ten,
+                        **kwargs
+                    )
+
+
+                    
+                    if res is not None:
+                        x_next, v_next, x_seq, _, h_state = res
+                        context_next = torch.ones(batch, self.heads, device=x.device)
+                        return x_next, v_next, context_next, h_state
+            except Exception as e:
+                # print(f"[MLayer] Fused path failed, falling back: {e}")
+                pass
+
         x_outs = []
         v_outs = []
         christoffel_outputs = []
@@ -465,9 +552,9 @@ class MLayer(nn.Module):
                 x_next = self.mixed_norm_x(x_next)
             else:
               
-                # AUDIT FIX: Project back to [-π, π] with smooth wrapping
-                # Use atan2 for differentiable gradients
-                x_next = torch.atan2(torch.sin(x_next), torch.cos(x_next))
+                # AUDIT FIX: Project back to [0, 2π) with smooth wrapping
+                # Use atan2 for differentiable gradients and consistency
+                x_next = apply_boundary_python(x_next, topology_id=1)
                 
             v_next = self.mixed_norm_v(v_next)
         else:

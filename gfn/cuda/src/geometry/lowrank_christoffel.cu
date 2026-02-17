@@ -10,6 +10,7 @@ namespace cuda {
 // Low-Rank Christoffel Kernel
 // ============================================================================
 
+template <typename scalar_t>
 __global__ void lowrank_christoffel_kernel(
     const scalar_t* __restrict__ v,      // [batch, dim]
     const scalar_t* __restrict__ U,      // [dim, rank]
@@ -39,7 +40,7 @@ __global__ void lowrank_christoffel_kernel(
     Topology topology = static_cast<Topology>(topology_id);
     
     // Compute Christoffel force
-    christoffel_device(
+    christoffel_device<scalar_t>(
         v_ptr, U, W, x_ptr, V_w,
         dim, rank,
         plasticity, sing_thresh, sing_strength,
@@ -52,6 +53,7 @@ __global__ void lowrank_christoffel_kernel(
 // Low-Rank Christoffel with Friction Kernel
 // ============================================================================
 
+template <typename scalar_t>
 __global__ void lowrank_christoffel_friction_kernel(
     const scalar_t* __restrict__ v,          // [batch, dim]
     const scalar_t* __restrict__ U,          // [dim, rank]
@@ -87,7 +89,7 @@ __global__ void lowrank_christoffel_friction_kernel(
     Topology topology = static_cast<Topology>(topology_id);
     
     // Compute Christoffel + Friction
-    christoffel_with_friction(
+    christoffel_with_friction<scalar_t>(
         v_ptr, U, W, x_ptr, V_w, force_ptr,
         W_forget, b_forget, W_input,
         dim, rank,
@@ -100,12 +102,6 @@ __global__ void lowrank_christoffel_friction_kernel(
 
 } // namespace cuda
 } // namespace gfn
-
-// ============================================================================
-// PyTorch C++ Interface
-// ============================================================================
-
-using namespace gfn::cuda;
 
 torch::Tensor lowrank_christoffel_fused(
     torch::Tensor v,           // [batch, dim]
@@ -120,53 +116,40 @@ torch::Tensor lowrank_christoffel_fused(
     float R,
     float r
 ) {
-    TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
-    TORCH_CHECK(U.is_cuda(), "U must be a CUDA tensor");
-    TORCH_CHECK(W.is_cuda(), "W must be a CUDA tensor");
-    TORCH_CHECK(v.dim() == 2, "v must be 2D [batch, dim]");
-    TORCH_CHECK(U.dim() == 2, "U must be 2D [dim, rank]");
-    TORCH_CHECK(W.dim() == 2, "W must be 2D [dim, rank]");
-    
+    auto device = v.device();
     int batch_size = v.size(0);
     int dim = v.size(1);
     int rank = U.size(1);
     
-    TORCH_CHECK(U.size(0) == dim, "U dimension mismatch");
-    TORCH_CHECK(W.size(0) == dim, "W dimension mismatch");
-    TORCH_CHECK(W.size(1) == rank, "W rank mismatch");
-    
     // Create output tensor
     auto gamma = torch::empty_like(v);
     
-    // Prepare pointers
-    const scalar_t* x_ptr = (x.numel() > 0) ? x.data_ptr<scalar_t>() : nullptr;
-    const scalar_t* V_w_ptr = (V_w.numel() > 0) ? V_w.data_ptr<scalar_t>() : nullptr;
-    
     // Launch kernel
-    int threads = DEFAULT_BLOCK_SIZE;
-    int blocks = div_ceil(batch_size, threads);
+    int threads = 256;
+    int blocks = (batch_size + threads - 1) / threads;
     
-    lowrank_christoffel_kernel<<<blocks, threads>>>(
-        v.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(),
-        W.data_ptr<scalar_t>(),
-        x_ptr,
-        V_w_ptr,
-        gamma.data_ptr<scalar_t>(),
-        batch_size,
-        dim,
-        rank,
-        plasticity,
-        sing_thresh,
-        sing_strength,
-        topology,
-        R,
-        r
-    );
-    
-    // Check for errors
-    cudaError_t err = cudaGetLastError();
-    TORCH_CHECK(err == cudaSuccess, "CUDA kernel error: ", cudaGetErrorString(err));
+    AT_DISPATCH_FLOATING_TYPES(v.scalar_type(), "lowrank_christoffel_fused", ([&] {
+        const scalar_t* x_ptr = (x.numel() > 0) ? x.data_ptr<scalar_t>() : nullptr;
+        const scalar_t* V_w_ptr = (V_w.numel() > 0) ? V_w.data_ptr<scalar_t>() : nullptr;
+
+        gfn::cuda::lowrank_christoffel_kernel<scalar_t><<<blocks, threads>>>(
+            v.data_ptr<scalar_t>(),
+            U.data_ptr<scalar_t>(),
+            W.data_ptr<scalar_t>(),
+            x_ptr,
+            V_w_ptr,
+            gamma.data_ptr<scalar_t>(),
+            batch_size,
+            dim,
+            rank,
+            static_cast<scalar_t>(plasticity),
+            static_cast<scalar_t>(sing_thresh),
+            static_cast<scalar_t>(sing_strength),
+            topology,
+            static_cast<scalar_t>(R),
+            static_cast<scalar_t>(r)
+        );
+    }));
     
     return gamma;
 }
@@ -189,9 +172,6 @@ torch::Tensor lowrank_christoffel_with_friction(
     float r,
     float velocity_friction_scale
 ) {
-    TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
-    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
-    
     int batch_size = v.size(0);
     int dim = v.size(1);
     int rank = U.size(1);
@@ -199,41 +179,38 @@ torch::Tensor lowrank_christoffel_with_friction(
     // Create output tensor
     auto output = torch::empty_like(v);
     
-    // Prepare pointers
-    const scalar_t* V_w_ptr = (V_w.numel() > 0) ? V_w.data_ptr<scalar_t>() : nullptr;
-    const scalar_t* force_ptr = (force.numel() > 0) ? force.data_ptr<scalar_t>() : nullptr;
-    const scalar_t* W_input_ptr = (W_input.numel() > 0) ? W_input.data_ptr<scalar_t>() : nullptr;
-    
     // Launch kernel
-    int threads = DEFAULT_BLOCK_SIZE;
-    int blocks = div_ceil(batch_size, threads);
+    int threads = 256;
+    int blocks = (batch_size + threads - 1) / threads;
     
-    lowrank_christoffel_friction_kernel<<<blocks, threads>>>(
-        v.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(),
-        W.data_ptr<scalar_t>(),
-        x.data_ptr<scalar_t>(),
-        V_w_ptr,
-        force_ptr,
-        W_forget.data_ptr<scalar_t>(),
-        b_forget.data_ptr<scalar_t>(),
-        W_input_ptr,
-        output.data_ptr<scalar_t>(),
-        batch_size,
-        dim,
-        rank,
-        plasticity,
-        sing_thresh,
-        sing_strength,
-        topology,
-        R,
-        r,
-        velocity_friction_scale
-    );
-    
-    // Check for errors
-    cudaError_t err = cudaGetLastError();
-    TORCH_CHECK(err == cudaSuccess, "CUDA kernel error: ", cudaGetErrorString(err));
+    AT_DISPATCH_FLOATING_TYPES(v.scalar_type(), "lowrank_christoffel_with_friction", ([&] {
+        const scalar_t* V_w_ptr = (V_w.numel() > 0) ? V_w.data_ptr<scalar_t>() : nullptr;
+        const scalar_t* force_ptr = (force.numel() > 0) ? force.data_ptr<scalar_t>() : nullptr;
+        const scalar_t* W_input_ptr = (W_input.numel() > 0) ? W_input.data_ptr<scalar_t>() : nullptr;
+
+        gfn::cuda::lowrank_christoffel_friction_kernel<scalar_t><<<blocks, threads>>>(
+            v.data_ptr<scalar_t>(),
+            U.data_ptr<scalar_t>(),
+            W.data_ptr<scalar_t>(),
+            x.data_ptr<scalar_t>(),
+            V_w_ptr,
+            force_ptr,
+            W_forget.data_ptr<scalar_t>(),
+            b_forget.data_ptr<scalar_t>(),
+            W_input_ptr,
+            output.data_ptr<scalar_t>(),
+            batch_size,
+            dim,
+            rank,
+            static_cast<scalar_t>(plasticity),
+            static_cast<scalar_t>(sing_thresh),
+            static_cast<scalar_t>(sing_strength),
+            topology,
+            static_cast<scalar_t>(R),
+            static_cast<scalar_t>(r),
+            static_cast<scalar_t>(velocity_friction_scale)
+        );
+    }));
     
     return output;
 }

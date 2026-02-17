@@ -13,6 +13,7 @@ namespace cuda {
  * 
  * AUDIT FIX (Component 7): Added hysteresis parameter gradients
  */
+template <typename scalar_t>
 __global__ void leapfrog_backward_kernel(
     const scalar_t* __restrict__ grad_x_out,    // [batch, dim]
     const scalar_t* __restrict__ grad_v_out,    // [batch, dim]
@@ -25,6 +26,7 @@ __global__ void leapfrog_backward_kernel(
     const scalar_t* __restrict__ W_forget,      // [dim, feature_dim]
     const scalar_t* __restrict__ b_forget,      // [dim]
     const scalar_t* __restrict__ W_input,       // [dim, dim] (Added)
+    const scalar_t* __restrict__ V_w,           // [dim] (Added)
     int batch_size,
     int dim,
     int rank,
@@ -55,6 +57,7 @@ __global__ void leapfrog_backward_kernel(
     scalar_t* __restrict__ grad_W_forget,       // [batch, dim, feature_dim]
     scalar_t* __restrict__ grad_b_forget,       // [batch, dim]
     scalar_t* __restrict__ grad_W_input,        // [batch, dim, dim] (Added)
+    scalar_t* __restrict__ grad_V_w,            // [batch, dim] (Added)
     // AUDIT FIX: Hysteresis gradient outputs
     scalar_t* __restrict__ grad_hyst_update_w,  // [batch, dim, hyst_in_dim]
     scalar_t* __restrict__ grad_hyst_update_b,  // [batch, dim]
@@ -66,7 +69,7 @@ __global__ void leapfrog_backward_kernel(
     
     Topology topology = static_cast<Topology>(topology_id);
     scalar_t effective_dt = dt * dt_scale;
-    scalar_t h = 0.5f * effective_dt;
+    scalar_t h = static_cast<scalar_t>(0.5) * effective_dt;
     
     // Initial adjoints from output gradients
     scalar_t lx[64];
@@ -84,6 +87,7 @@ __global__ void leapfrog_backward_kernel(
     scalar_t* gbf_b = grad_b_forget + idx * dim;
     scalar_t* gf_b = grad_force + idx * dim;
     scalar_t* gWinput_b = (W_input != nullptr) ? (grad_W_input + idx * dim * dim) : nullptr;
+    scalar_t* gVw_b = (V_w != nullptr) ? (grad_V_w + idx * dim) : nullptr;
     
     // AUDIT FIX (Component 7): Hysteresis gradient pointers
     scalar_t* gHupdate_w_b = hyst_enabled ? (grad_hyst_update_w + idx * dim * hyst_in_dim) : nullptr;
@@ -94,19 +98,22 @@ __global__ void leapfrog_backward_kernel(
     const scalar_t* f_ptr = force + idx * dim;
     
     // Re-initialize parameter gradients for this thread
-    for (int i = 0; i < dim * rank; ++i) { gU_b[i] = 0; gW_b[i] = 0; }
-    for (int i = 0; i < dim * f_dim; ++i) { gWf_b[i] = 0; }
-    for (int i = 0; i < dim; ++i) { gbf_b[i] = 0; gf_b[i] = 0; }
+    for (int i = 0; i < dim * rank; ++i) { gU_b[i] = static_cast<scalar_t>(0); gW_b[i] = static_cast<scalar_t>(0); }
+    for (int i = 0; i < dim * f_dim; ++i) { gWf_b[i] = static_cast<scalar_t>(0); }
+    for (int i = 0; i < dim; ++i) { gbf_b[i] = static_cast<scalar_t>(0); gf_b[i] = static_cast<scalar_t>(0); }
     if (gWinput_b != nullptr) {
-        for (int i = 0; i < dim * dim; ++i) { gWinput_b[i] = 0; }
+        for (int i = 0; i < dim * dim; ++i) { gWinput_b[i] = static_cast<scalar_t>(0); }
+    }
+    if (gVw_b != nullptr) {
+        for (int i = 0; i < dim; ++i) { gVw_b[i] = static_cast<scalar_t>(0); }
     }
     
     // AUDIT FIX: Initialize hysteresis gradients
     if (hyst_enabled) {
-        for (int i = 0; i < dim * hyst_in_dim; ++i) { gHupdate_w_b[i] = 0; }
-        for (int i = 0; i < dim; ++i) { gHupdate_b_b[i] = 0; }
-        for (int i = 0; i < dim * dim; ++i) { gHreadout_w_b[i] = 0; }
-        for (int i = 0; i < dim; ++i) { gHreadout_b_b[i] = 0; }
+        for (int i = 0; i < dim * hyst_in_dim; ++i) { gHupdate_w_b[i] = static_cast<scalar_t>(0); }
+        for (int i = 0; i < dim; ++i) { gHupdate_b_b[i] = static_cast<scalar_t>(0); }
+        for (int i = 0; i < dim * dim; ++i) { gHreadout_w_b[i] = static_cast<scalar_t>(0); }
+        for (int i = 0; i < dim; ++i) { gHreadout_b_b[i] = static_cast<scalar_t>(0); }
     }
     
     // --- ADJOINT LOOP BACKWARDS ---
@@ -120,24 +127,39 @@ __global__ void leapfrog_backward_kernel(
         // --- ADJOINT KICK 2 ---
         // Forward: v_next = (v_mid + h(F - gamma(v_mid, x_next))) / (1 + h*mu(x_next))
         scalar_t mu_next[64], gamma_mid[64];
-        scalar_t v_mid_norm = 0.0f;
-        if (velocity_friction_scale > 0.0f) {
+        scalar_t v_mid_norm = static_cast<scalar_t>(0);
+        if (velocity_friction_scale > static_cast<scalar_t>(0)) {
             for(int i=0; i<dim; ++i) v_mid_norm += v_mid[i] * v_mid[i];
-            v_mid_norm = sqrtf(v_mid_norm);
+            v_mid_norm = sqrt(v_mid_norm);
         }
 
         if (W_forget != nullptr && b_forget != nullptr) {
-            compute_friction(x_next, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, v_mid_norm, mu_next);
+            compute_friction<scalar_t>(x_next, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, v_mid_norm, mu_next);
         } else {
-            for (int i = 0; i < dim; ++i) mu_next[i] = 0.0f;
+            for (int i = 0; i < dim; ++i) mu_next[i] = static_cast<scalar_t>(0);
         }
-        christoffel_device(v_mid, U, W, x_next, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_mid);
+        christoffel_device<scalar_t>(v_mid, U, W, x_next, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_mid);
         
+        // AUDIT FIX: Include f_ghost in adjoint (though 0 in current tests)
+        scalar_t f_ghost_vec[64];
+        for(int i=0; i<dim; ++i) f_ghost_vec[i] = static_cast<scalar_t>(0);
+
+        if (hyst_enabled && traj_h && hyst_readout_w) {
+            // Readout ghost force at x_next using recorded h_curr
+            const scalar_t* h_curr_b = traj_h + idx * (steps + 1) * dim + (step + 1) * dim;
+            for (int i = 0; i < dim; ++i) {
+                scalar_t sum = (hyst_readout_b) ? hyst_readout_b[i] : 0.0f;
+                for (int j = 0; j < dim; ++j) { sum += h_curr_b[j] * hyst_readout_w[i * dim + j]; }
+                f_ghost_vec[i] = sum;
+            }
+        }
+
         scalar_t l_v_mid[64], l_mu_next[64], l_gamma_mid[64];
         for (int i = 0; i < dim; ++i) {
-            scalar_t den = 1.0f + h * mu_next[i];
+            // Forward: v_next = (v_mid + h(F + Fg - gamma)) / (1 + h*mu + eps)
+            scalar_t den = static_cast<scalar_t>(1) + h * mu_next[i] + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>);
             l_v_mid[i] = lv[i] / den;
-            l_mu_next[i] = -h * lv[i] * ((v_mid[i] + h * (f_ptr[i] - gamma_mid[i])) / (den * den));
+            l_mu_next[i] = -h * lv[i] * ((v_mid[i] + h * (f_ptr[i] + f_ghost_vec[i] - gamma_mid[i])) / (den * den));
             l_gamma_mid[i] = -h * lv[i] / den;
             gf_b[i] += h * lv[i] / den;
         }
@@ -148,10 +170,10 @@ __global__ void leapfrog_backward_kernel(
             scalar_t v_scale_term = 1.0f;
             scalar_t v_scale_norm_factor = 0.0f;
             
-            if (velocity_friction_scale > 0.0f) {
-                scalar_t norm_eps = sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH;
-                v_scale_term = 1.0f + velocity_friction_scale * v_mid_norm / norm_eps;
-                if (v_mid_norm > 1e-8f) {
+            if (velocity_friction_scale > static_cast<scalar_t>(0)) {
+                scalar_t norm_eps = sqrt(static_cast<scalar_t>(dim)) + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>);
+                v_scale_term = static_cast<scalar_t>(1) + velocity_friction_scale * v_mid_norm / norm_eps;
+                if (v_mid_norm > EPSILON_STANDARD<scalar_t>) {
                     v_scale_norm_factor = velocity_friction_scale / norm_eps;
                 }
             }
@@ -160,8 +182,8 @@ __global__ void leapfrog_backward_kernel(
                 l_mu_base[i] = l_mu_next[i] * v_scale_term;
             }
             
-            if (velocity_friction_scale > 0.0f && v_mid_norm > 1e-8f) {
-                scalar_t sum_factor = 0.0f;
+            if (velocity_friction_scale > static_cast<scalar_t>(0) && v_mid_norm > EPSILON_STANDARD<scalar_t>) {
+                scalar_t sum_factor = static_cast<scalar_t>(0);
                 for(int i=0; i<dim; ++i) {
                     scalar_t mu_base_i = mu_next[i] / v_scale_term;
                     sum_factor += l_mu_next[i] * mu_base_i;
@@ -173,14 +195,14 @@ __global__ void leapfrog_backward_kernel(
                 }
             }
 
-            friction_backward_device(l_mu_base, x_next, f_ptr, W_forget, b_forget, W_input, dim, topology, gWf_b, gbf_b, gWinput_b, lx, gf_b);
+            friction_backward_device<scalar_t>(l_mu_base, x_next, f_ptr, W_forget, b_forget, W_input, dim, topology, gWf_b, gbf_b, gWinput_b, lx, gf_b);
         }
         
         // Adjoint of christoffel at v_mid, x_next
         scalar_t gv_c[64], gx_c[64];
-        vector_zero(gv_c, dim);
-        vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma_mid, gamma_mid, v_mid, U, W, x_next, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        vector_zero<scalar_t>(gv_c, dim);
+        vector_zero<scalar_t>(gx_c, dim);
+        christoffel_backward_device<scalar_t>(l_gamma_mid, gamma_mid, v_mid, U, W, x_next, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c, gVw_b);
         for (int i = 0; i < dim; ++i) {
             l_v_mid[i] += gv_c[i];
             lx[i] += gx_c[i];
@@ -195,24 +217,38 @@ __global__ void leapfrog_backward_kernel(
         // --- ADJOINT KICK 1 ---
         // Forward: v_mid = (v_n + h(F - gamma(v_n, x_n))) / (1 + h*mu(x_n))
         scalar_t mu_n[64], gamma_n[64];
-        scalar_t v_n_norm = 0.0f;
-        if (velocity_friction_scale > 0.0f) {
+        scalar_t v_n_norm = static_cast<scalar_t>(0);
+        if (velocity_friction_scale > static_cast<scalar_t>(0)) {
             for(int i=0; i<dim; ++i) v_n_norm += v_n[i] * v_n[i];
-            v_n_norm = sqrtf(v_n_norm);
+            v_n_norm = sqrt(v_n_norm);
         }
 
         if (W_forget != nullptr && b_forget != nullptr) {
-            compute_friction(x_n, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, v_n_norm, mu_n);
+            compute_friction<scalar_t>(x_n, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, v_n_norm, mu_n);
         } else {
-            for (int i = 0; i < dim; ++i) mu_n[i] = 0.0f;
+            for (int i = 0; i < dim; ++i) mu_n[i] = static_cast<scalar_t>(0);
         }
-        christoffel_device(v_n, U, W, x_n, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_n);
+        christoffel_device<scalar_t>(v_n, U, W, x_n, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma_n);
         
+        // AUDIT FIX: Include f_ghost in Kick 1 adjoint
+        scalar_t f_ghost_vec_n[64];
+        for(int i=0; i<dim; ++i) f_ghost_vec_n[i] = static_cast<scalar_t>(0);
+
+        if (hyst_enabled && traj_h && hyst_readout_w) {
+            const scalar_t* h_prev_b = traj_h + idx * (steps + 1) * dim + step * dim;
+            for (int i = 0; i < dim; ++i) {
+                scalar_t sum = (hyst_readout_b) ? hyst_readout_b[i] : 0.0f;
+                for (int j = 0; j < dim; ++j) { sum += h_prev_b[j] * hyst_readout_w[i * dim + j]; }
+                f_ghost_vec_n[i] = sum;
+            }
+        }
+
         scalar_t l_v_n[64], l_mu_n[64], l_gamma_n[64];
         for (int i = 0; i < dim; ++i) {
-            scalar_t den = 1.0f + h * mu_n[i];
+            // Forward: v_mid = (v_n + h(F + Fg - gamma)) / (1 + h*mu + eps)
+            scalar_t den = static_cast<scalar_t>(1) + h * mu_n[i] + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>);
             l_v_n[i] = l_v_mid[i] / den;
-            l_mu_n[i] = -h * l_v_mid[i] * ((v_n[i] + h * (f_ptr[i] - gamma_n[i])) / (den * den));
+            l_mu_n[i] = -h * l_v_mid[i] * ((v_n[i] + h * (f_ptr[i] + f_ghost_vec_n[i] - gamma_n[i])) / (den * den));
             l_gamma_n[i] = -h * l_v_mid[i] / den;
             gf_b[i] += h * l_v_mid[i] / den;
         }
@@ -223,10 +259,10 @@ __global__ void leapfrog_backward_kernel(
             scalar_t v_scale_term = 1.0f;
             scalar_t v_scale_norm_factor = 0.0f;
             
-            if (velocity_friction_scale > 0.0f) {
-                scalar_t norm_eps = sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH;
-                v_scale_term = 1.0f + velocity_friction_scale * v_n_norm / norm_eps;
-                if (v_n_norm > 1e-8f) {
+            if (velocity_friction_scale > static_cast<scalar_t>(0)) {
+                scalar_t norm_eps = sqrt(static_cast<scalar_t>(dim)) + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>);
+                v_scale_term = static_cast<scalar_t>(1) + velocity_friction_scale * v_n_norm / norm_eps;
+                if (v_n_norm > EPSILON_STANDARD<scalar_t>) {
                     v_scale_norm_factor = velocity_friction_scale / norm_eps;
                 }
             }
@@ -235,8 +271,8 @@ __global__ void leapfrog_backward_kernel(
                 l_mu_base[i] = l_mu_n[i] * v_scale_term;
             }
             
-            if (velocity_friction_scale > 0.0f && v_n_norm > 1e-8f) {
-                scalar_t sum_factor = 0.0f;
+            if (velocity_friction_scale > static_cast<scalar_t>(0) && v_n_norm > EPSILON_STANDARD<scalar_t>) {
+                scalar_t sum_factor = static_cast<scalar_t>(0);
                 for(int i=0; i<dim; ++i) {
                     scalar_t mu_base_i = mu_n[i] / v_scale_term;
                     sum_factor += l_mu_n[i] * mu_base_i;
@@ -248,13 +284,13 @@ __global__ void leapfrog_backward_kernel(
                 }
             }
 
-            friction_backward_device(l_mu_base, x_n, f_ptr, W_forget, b_forget, W_input, dim, topology, gWf_b, gbf_b, gWinput_b, lx, gf_b);
+            friction_backward_device<scalar_t>(l_mu_base, x_n, f_ptr, W_forget, b_forget, W_input, dim, topology, gWf_b, gbf_b, gWinput_b, lx, gf_b);
         }
         
         // Adjoint of christoffel at v_n, x_n
-        vector_zero(gv_c, dim);
-        vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma_n, gamma_n, v_n, U, W, x_n, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        vector_zero<scalar_t>(gv_c, dim);
+        vector_zero<scalar_t>(gx_c, dim);
+        christoffel_backward_device<scalar_t>(l_gamma_n, gamma_n, v_n, U, W, x_n, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gv_c, gU_b, gW_b, gx_c, gVw_b);
         for (int i = 0; i < dim; ++i) {
             lv[i] = l_v_n[i] + gv_c[i];
             lx[i] += gx_c[i];
@@ -268,7 +304,7 @@ __global__ void leapfrog_backward_kernel(
     if (hyst_enabled && traj_h && hyst_update_w != nullptr && hyst_update_b != nullptr) {
         // Initialize adjoint state for hysteresis
         scalar_t lh[64];  // Adjoint of hysteresis state
-        for (int i = 0; i < dim; ++i) { lh[i] = 0.0f; }
+        for (int i = 0; i < dim; ++i) { lh[i] = static_cast<scalar_t>(0); }
         
         // BPTT loop backward through time
         for (int step = steps - 1; step >= 0; --step) {
@@ -305,8 +341,8 @@ __global__ void leapfrog_backward_kernel(
                     }
                 }
                 
-                tanh_val[i] = tanhf(sum[i]);
-                tanh_grad[i] = 1.0f - tanh_val[i] * tanh_val[i];  // sech²(sum) = 1 - tanh²(sum)
+                tanh_val[i] = tanh(sum[i]);
+                tanh_grad[i] = static_cast<scalar_t>(1) - tanh_val[i] * tanh_val[i];  // sech²(sum) = 1 - tanh²(sum)
             }
             
             // Adjoint of tanh nonlinearity
@@ -324,8 +360,8 @@ __global__ void leapfrog_backward_kernel(
                     // ∂L/∂W_u (depends on input features φ(x,v))
                     if (topology == Topology::TORUS) {
                         for (int j = 0; j < dim; ++j) {
-                            gHupdate_w_b[i * hyst_in_dim + j] += lsum[i] * sinf(x_step[j]);
-                            gHupdate_w_b[i * hyst_in_dim + (dim + j)] += lsum[i] * cosf(x_step[j]);
+                            gHupdate_w_b[i * hyst_in_dim + j] += lsum[i] * sin(x_step[j]);
+                            gHupdate_w_b[i * hyst_in_dim + (dim + j)] += lsum[i] * cos(x_step[j]);
                             gHupdate_w_b[i * hyst_in_dim + (2*dim + j)] += lsum[i] * v_step[j];
                         }
                     } else {
@@ -340,9 +376,9 @@ __global__ void leapfrog_backward_kernel(
             // Accumulate gradients for W_r and b_r from readout
             if (hyst_enabled && gHreadout_b_b != nullptr && gHreadout_w_b != nullptr) {
                 for (int i = 0; i < dim; ++i) {
-                    gHreadout_b_b[i] += 0.0f;  // Placeholder for now
+                    gHreadout_b_b[i] += static_cast<scalar_t>(0);  // Placeholder for now
                     for (int j = 0; j < dim; ++j) {
-                        gHreadout_w_b[i * dim + j] += 0.0f;  // Placeholder
+                        gHreadout_w_b[i * dim + j] += static_cast<scalar_t>(0);  // Placeholder
                     }
                 }
             }
@@ -369,10 +405,12 @@ using namespace gfn::cuda;
 
 // Helper kernel for trajectory re-computation
 // AUDIT FIX (Component 7): Helper kernel for trajectory re-computation WITH HYSTERESIS
+template <typename scalar_t>
 __global__ void leapfrog_forward_traj_kernel(
     const scalar_t* x_in, const scalar_t* v_in, const scalar_t* force,
     const scalar_t* U, const scalar_t* W, const scalar_t* W_forget, const scalar_t* b_forget,
     const scalar_t* W_input, // Added
+    const scalar_t* V_w, // Added
     int batch_size, int dim, int rank, scalar_t dt, scalar_t dt_scale, int steps,
     int topology_id, scalar_t plasticity, scalar_t sing_thresh, scalar_t sing_strength, scalar_t R, scalar_t r,
     scalar_t velocity_friction_scale, // Added
@@ -398,12 +436,12 @@ __global__ void leapfrog_forward_traj_kernel(
     for (int i = 0; i < dim; ++i) { 
         cx[i] = x_in[idx * dim + i]; 
         cv[i] = v_in[idx * dim + i]; 
-        hyst_local[i] = hyst_enabled && hysteresis_state_in ? hysteresis_state_in[idx * dim + i] : 0.0f;
+        hyst_local[i] = hyst_enabled && hysteresis_state_in ? hysteresis_state_in[idx * dim + i] : static_cast<scalar_t>(0);
     }
     
     Topology topology = static_cast<Topology>(topology_id);
     scalar_t effective_dt = dt * dt_scale;
-    scalar_t h = 0.5f * effective_dt;
+    scalar_t h = static_cast<scalar_t>(0.5) * effective_dt;
     const scalar_t* f_ptr = force + idx * dim;
     
     // AUDIT FIX: Store initial hysteresis state
@@ -422,7 +460,7 @@ __global__ void leapfrog_forward_traj_kernel(
         
         // AUDIT FIX: Compute ghost force from hysteresis
         scalar_t f_ghost[64];
-        for (int i = 0; i < dim; ++i) { f_ghost[i] = 0.0f; }
+        for (int i = 0; i < dim; ++i) { f_ghost[i] = static_cast<scalar_t>(0); }
         
         if (hyst_enabled && hyst_readout_w && hyst_readout_b) {
             for (int i = 0; i < dim; ++i) {
@@ -435,42 +473,43 @@ __global__ void leapfrog_forward_traj_kernel(
         }
         
         // Calculate v_norm for friction
-        scalar_t cv_norm = 0.0f;
-        if (velocity_friction_scale > 0.0f) {
+        scalar_t cv_norm = static_cast<scalar_t>(0);
+        if (velocity_friction_scale > static_cast<scalar_t>(0)) {
             for(int i=0; i<dim; ++i) cv_norm += cv[i] * cv[i];
-            cv_norm = sqrtf(cv_norm);
+            cv_norm = sqrt(cv_norm);
         }
 
         if (W_forget != nullptr && b_forget != nullptr) {
-            compute_friction(cx, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, cv_norm, friction);
+            compute_friction<scalar_t>(cx, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, cv_norm, friction);
         } else {
-            for (int i = 0; i < dim; ++i) friction[i] = 0.0f;
+            for (int i = 0; i < dim; ++i) friction[i] = static_cast<scalar_t>(0);
         }
-        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
+        christoffel_device<scalar_t>(cv, U, W, cx, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
         for (int i = 0; i < dim; ++i) {
-            cv[i] = (cv[i] + h * (f_ptr[i] + f_ghost[i] - gamma[i])) / (1.0f + h * friction[i]);
+            // AUDIT FIX: Use exactly one EPSILON_STANDARD in denominator
+            cv[i] = (cv[i] + h * (f_ptr[i] + f_ghost[i] - gamma[i])) / (static_cast<scalar_t>(1) + h * friction[i] + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
             traj_v[idx * steps * 2 * dim + (step * 2 + 1) * dim + i] = cv[i]; // Store v_mid
         }
         
         for (int i = 0; i < dim; ++i) { cx[i] += effective_dt * cv[i]; }
         apply_boundary_vector(cx, dim, topology);
         
-        // Update v_norm for next friction (v_mid is now in cv)
-        if (velocity_friction_scale > 0.0f) {
-            cv_norm = 0.0f;
+        // Update v_norm for next drift (v_mid is now in cv)
+        if (velocity_friction_scale > static_cast<scalar_t>(0)) {
+            cv_norm = static_cast<scalar_t>(0);
             for(int i=0; i<dim; ++i) cv_norm += cv[i] * cv[i];
-            cv_norm = sqrtf(cv_norm);
+            cv_norm = sqrt(cv_norm);
         }
 
         if (W_forget != nullptr && b_forget != nullptr) {
-            compute_friction(cx, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, cv_norm, friction);
+            compute_friction<scalar_t>(cx, f_ptr, W_forget, b_forget, W_input, dim, topology, velocity_friction_scale, cv_norm, friction);
         } else {
-            for (int i = 0; i < dim; ++i) friction[i] = 0.0f;
+            for (int i = 0; i < dim; ++i) friction[i] = static_cast<scalar_t>(0);
         }
-        christoffel_device(cv, U, W, cx, nullptr, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
+        christoffel_device<scalar_t>(cv, U, W, cx, V_w, dim, rank, plasticity, sing_thresh, sing_strength, topology, R, r, gamma);
         
         // Recompute ghost force after drift
-        for (int i = 0; i < dim; ++i) { f_ghost[i] = 0.0f; }
+        for (int i = 0; i < dim; ++i) { f_ghost[i] = static_cast<scalar_t>(0); }
         if (hyst_enabled && hyst_readout_w && hyst_readout_b) {
             for (int i = 0; i < dim; ++i) {
                 scalar_t sum = hyst_readout_b[i];
@@ -482,7 +521,8 @@ __global__ void leapfrog_forward_traj_kernel(
         }
         
         for (int i = 0; i < dim; ++i) {
-            cv[i] = (cv[i] + h * (f_ptr[i] + f_ghost[i] - gamma[i])) / (1.0f + h * friction[i]);
+            // AUDIT FIX: Use exactly one EPSILON_STANDARD in denominator
+            cv[i] = (cv[i] + h * (f_ptr[i] + f_ghost[i] - gamma[i])) / (static_cast<scalar_t>(1) + h * friction[i] + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
         }
         
         // AUDIT FIX: Update hysteresis state
@@ -492,8 +532,8 @@ __global__ void leapfrog_forward_traj_kernel(
                 
                 if (topology == Topology::TORUS) {
                     for (int j = 0; j < dim; ++j) {
-                        sum += sinf(cx[j]) * hyst_update_w[i * hyst_in_dim + j];
-                        sum += cosf(cx[j]) * hyst_update_w[i * hyst_in_dim + (dim + j)];
+                        sum += sin(cx[j]) * hyst_update_w[i * hyst_in_dim + j];
+                        sum += cos(cx[j]) * hyst_update_w[i * hyst_in_dim + (dim + j)];
                         sum += cv[j] * hyst_update_w[i * hyst_in_dim + (2*dim + j)];
                     }
                 } else {
@@ -503,7 +543,7 @@ __global__ void leapfrog_forward_traj_kernel(
                     }
                 }
                 
-                hyst_local[i] = hyst_local[i] * hyst_decay + tanhf(sum);
+                hyst_local[i] = hyst_local[i] * hyst_decay + tanh(sum);
             }
         }
         
@@ -524,6 +564,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
     torch::Tensor x_in, torch::Tensor v_in, torch::Tensor force,
     torch::Tensor U, torch::Tensor W, torch::Tensor W_forget, torch::Tensor b_forget,
     torch::Tensor W_input, // Added
+    torch::Tensor V_w, // Added
     float dt, float dt_scale, int steps, int topology,
     float plasticity, float sing_thresh, float sing_strength, float R, float r,
     float velocity_friction_scale, // Added
@@ -555,6 +596,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
     auto grad_W_forget = torch::zeros({batch_size, dim, f_dim}, options);
     auto grad_b_forget = torch::zeros({batch_size, dim}, options);
     auto grad_W_input = (W_input.numel() > 0) ? torch::zeros({batch_size, dim, dim}, options) : torch::empty({0}, options);
+    auto grad_V_w = (V_w.numel() > 0) ? torch::zeros({batch_size, dim}, options) : torch::empty({0}, options);
     
     // AUDIT FIX: Allocate hysteresis gradients
     auto grad_hyst_update_w = hyst_enabled ? torch::zeros({batch_size, dim, hyst_in_dim}, options) : torch::empty({0}, options);
@@ -565,54 +607,63 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
     int threads = 256;
     int blocks = (batch_size + threads - 1) / threads;
 
-    // 1. Re-compute trajectory WITH HYSTERESIS
-    leapfrog_forward_traj_kernel<<<blocks, threads>>>(
-        x_in.data_ptr<scalar_t>(), v_in.data_ptr<scalar_t>(), force.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
-        W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
-        b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
-        W_input.numel() > 0 ? W_input.data_ptr<scalar_t>() : nullptr,
-        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, sing_thresh, sing_strength, R, r,
-        velocity_friction_scale, // Added
-        // AUDIT FIX: Hysteresis parameters
-        hyst_enabled && hysteresis_state_in.numel() > 0 ? hysteresis_state_in.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_update_b.numel() > 0 ? hyst_update_b.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_readout_w.numel() > 0 ? hyst_readout_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_readout_b.numel() > 0 ? hyst_readout_b.data_ptr<scalar_t>() : nullptr,
-        hyst_decay, hyst_enabled, hyst_in_dim,
-        traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(),
-        hyst_enabled ? traj_h.data_ptr<scalar_t>() : nullptr
-    );
+    AT_DISPATCH_FLOATING_TYPES(x_in.scalar_type(), "leapfrog_backward_cuda", ([&] {
+        // 1. Re-compute trajectory WITH HYSTERESIS
+        leapfrog_forward_traj_kernel<scalar_t><<<blocks, threads>>>(
+            x_in.data_ptr<scalar_t>(), v_in.data_ptr<scalar_t>(), force.data_ptr<scalar_t>(),
+            U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
+            W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
+            b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
+            W_input.numel() > 0 ? W_input.data_ptr<scalar_t>() : nullptr,
+            V_w.numel() > 0 ? V_w.data_ptr<scalar_t>() : nullptr,
+            batch_size, dim, rank, static_cast<scalar_t>(dt), static_cast<scalar_t>(dt_scale), steps, topology, 
+            static_cast<scalar_t>(plasticity), static_cast<scalar_t>(sing_thresh), static_cast<scalar_t>(sing_strength), 
+            static_cast<scalar_t>(R), static_cast<scalar_t>(r),
+            static_cast<scalar_t>(velocity_friction_scale), // Added
+            // AUDIT FIX: Hysteresis parameters
+            hyst_enabled && hysteresis_state_in.numel() > 0 ? hysteresis_state_in.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_update_b.numel() > 0 ? hyst_update_b.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_readout_w.numel() > 0 ? hyst_readout_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_readout_b.numel() > 0 ? hyst_readout_b.data_ptr<scalar_t>() : nullptr,
+            static_cast<scalar_t>(hyst_decay), hyst_enabled, hyst_in_dim,
+            traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(),
+            hyst_enabled ? traj_h.data_ptr<scalar_t>() : nullptr
+        );
 
-    // 2. Compute Adjoint Gradients WITH HYSTERESIS BPTT
-    leapfrog_backward_kernel<<<blocks, threads>>>(
-        grad_x_out.data_ptr<scalar_t>(), grad_v_out.data_ptr<scalar_t>(),
-        traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(),
-        hyst_enabled ? traj_h.data_ptr<scalar_t>() : nullptr,  // AUDIT FIX: Add traj_h parameter
-        force.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
-        W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
-        b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
-        W_input.numel() > 0 ? W_input.data_ptr<scalar_t>() : nullptr,
-        batch_size, dim, rank, dt, dt_scale, steps, topology, plasticity, sing_thresh, sing_strength, R, r,
-        velocity_friction_scale, // Added
-        // AUDIT FIX: Hysteresis parameters for backward
-        hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_update_b.numel() > 0 ? hyst_update_b.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_readout_w.numel() > 0 ? hyst_readout_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled && hyst_readout_b.numel() > 0 ? hyst_readout_b.data_ptr<scalar_t>() : nullptr,
-        hyst_decay, hyst_enabled, hyst_in_dim,
-        grad_x_in.data_ptr<scalar_t>(), grad_v_in.data_ptr<scalar_t>(), grad_force.data_ptr<scalar_t>(),
-        grad_U.data_ptr<scalar_t>(), grad_W.data_ptr<scalar_t>(),
-        grad_W_forget.data_ptr<scalar_t>(), grad_b_forget.data_ptr<scalar_t>(),
-        W_input.numel() > 0 ? grad_W_input.data_ptr<scalar_t>() : nullptr,
-        // AUDIT FIX: Hysteresis gradient outputs
-        hyst_enabled ? grad_hyst_update_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled ? grad_hyst_update_b.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled ? grad_hyst_readout_w.data_ptr<scalar_t>() : nullptr,
-        hyst_enabled ? grad_hyst_readout_b.data_ptr<scalar_t>() : nullptr
-    );
+        // 2. Compute Adjoint Gradients WITH HYSTERESIS BPTT
+        gfn::cuda::leapfrog_backward_kernel<scalar_t><<<blocks, threads>>>(
+            grad_x_out.data_ptr<scalar_t>(), grad_v_out.data_ptr<scalar_t>(),
+            traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(),
+            hyst_enabled ? traj_h.data_ptr<scalar_t>() : nullptr,  // AUDIT FIX: Add traj_h parameter
+            force.data_ptr<scalar_t>(),
+            U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
+            W_forget.numel() > 0 ? W_forget.data_ptr<scalar_t>() : nullptr,
+            b_forget.numel() > 0 ? b_forget.data_ptr<scalar_t>() : nullptr,
+            W_input.numel() > 0 ? W_input.data_ptr<scalar_t>() : nullptr,
+            V_w.numel() > 0 ? V_w.data_ptr<scalar_t>() : nullptr,
+            batch_size, dim, rank, static_cast<scalar_t>(dt), static_cast<scalar_t>(dt_scale), steps, topology, 
+            static_cast<scalar_t>(plasticity), static_cast<scalar_t>(sing_thresh), static_cast<scalar_t>(sing_strength), 
+            static_cast<scalar_t>(R), static_cast<scalar_t>(r),
+            static_cast<scalar_t>(velocity_friction_scale), // Added
+            // AUDIT FIX: Hysteresis parameters for backward
+            hyst_enabled && hyst_update_w.numel() > 0 ? hyst_update_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_update_b.numel() > 0 ? hyst_update_b.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_readout_w.numel() > 0 ? hyst_readout_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled && hyst_readout_b.numel() > 0 ? hyst_readout_b.data_ptr<scalar_t>() : nullptr,
+            static_cast<scalar_t>(hyst_decay), hyst_enabled, hyst_in_dim,
+            grad_x_in.data_ptr<scalar_t>(), grad_v_in.data_ptr<scalar_t>(), grad_force.data_ptr<scalar_t>(),
+            grad_U.data_ptr<scalar_t>(), grad_W.data_ptr<scalar_t>(),
+            grad_W_forget.data_ptr<scalar_t>(), grad_b_forget.data_ptr<scalar_t>(),
+            W_input.numel() > 0 ? grad_W_input.data_ptr<scalar_t>() : nullptr,
+            V_w.numel() > 0 ? grad_V_w.data_ptr<scalar_t>() : nullptr,
+            // AUDIT FIX: Hysteresis gradient outputs
+            hyst_enabled ? grad_hyst_update_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled ? grad_hyst_update_b.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled ? grad_hyst_readout_w.data_ptr<scalar_t>() : nullptr,
+            hyst_enabled ? grad_hyst_readout_b.data_ptr<scalar_t>() : nullptr
+        );
+    }));
 
     // Return gradients
     return {
@@ -620,6 +671,7 @@ std::vector<torch::Tensor> leapfrog_backward_cuda(
         grad_U.sum(0), grad_W.sum(0), 
         grad_W_forget.sum(0), grad_b_forget.sum(0),
         grad_W_input.numel() > 0 ? grad_W_input.sum(0) : torch::empty({0}, options),
+        grad_V_w.numel() > 0 ? grad_V_w.sum(0) : torch::empty({0}, options),
         // AUDIT FIX: Return hysteresis gradients
         hyst_enabled ? grad_hyst_update_w.sum(0) : torch::empty({0}, options),
         hyst_enabled ? grad_hyst_update_b.sum(0) : torch::empty({0}, options),

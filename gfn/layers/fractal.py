@@ -46,9 +46,9 @@ class FractalMLayer(nn.Module):
         self.threshold = fract_cfg.get('threshold', 0.5)
         self.alpha_scale = fract_cfg.get('alpha', 0.2)
         
-    def forward(self, x, v, force=None, context=None, collect_christ=False):
+    def forward(self, x, v, force=None, context=None, collect_christ=False, memory_state=None):
         # 1. Macro-evolution (Standard flow)
-        x_m, v_m, ctx_m, christoffels = self.macro_manifold(x, v, force, context, collect_christ=collect_christ)
+        x_m, v_m, ctx_m, christoffels = self.macro_manifold(x, v, force, context, collect_christ=collect_christ, memory_state=memory_state)
         
         if not self.physics_config.get('fractal', {}).get('enabled', False):
             return x_m, v_m, ctx_m, christoffels

@@ -32,7 +32,7 @@ class GeodesicOptimalityTester:
     def __init__(self, model, device='cuda'):
         self.model = model.to(device)
         self.device = device
-        self.results_dir = PROJECT_ROOT / "tests" / "professional" / "results"
+        self.results_dir = PROJECT_ROOT / "tests" / "results" / "geodesic"
         self.results_dir.mkdir(parents=True, exist_ok=True)
     
     def compute_path_length(self, trajectory):
@@ -195,9 +195,10 @@ class GeodesicOptimalityTester:
         """
         print("\n🔬 Test 2: Manifold Curvature Field Visualization")
         
-        # Extract first layer's Christoffel network
         layer = self.model.layers[0]
-        christoffel = layer.christoffel
+        heads = layer.heads
+        head_dim = self.model.dim // heads
+        christoffel = layer.christoffels[0]
         
         # Sample velocity space in 2D slice
         grid_size = 40
@@ -210,12 +211,14 @@ class GeodesicOptimalityTester:
         with torch.no_grad():
             for i in range(grid_size):
                 for j in range(grid_size):
-                    v_sample = torch.zeros(1, self.model.dim).to(self.device)
+                    v_sample = torch.zeros(1, head_dim).to(self.device)
                     v_sample[0, 0] = X[i, j]
                     v_sample[0, 1] = Y[i, j]
                     
+                    x_sample = torch.zeros(1, head_dim).to(self.device)
+                    
                     # Compute Christoffel symbol: Γ(v, v)
-                    gamma = christoffel(v_sample)
+                    gamma = christoffel(v_sample, x_sample)
                     
                     # Curvature magnitude
                     curvatures[i, j] = torch.norm(gamma).item()

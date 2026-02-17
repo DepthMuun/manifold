@@ -13,6 +13,29 @@ namespace cuda {
 // ============================================================================
 
 /**
+ * Normalize Christoffel structure to enforce symmetry.
+ * This is CRITICAL for Python-CUDA parity.
+ *
+ * Implements: gamma_sym[i,j] = 0.5 * (gamma[i,j] + gamma[j,i])
+ * This ensures Gamma^k_ij approx Gamma^k_ji numerically, which is required
+ * for torsion-free connections.
+ *
+ * @param gamma Input/Output Christoffel symbols [dim x dim]
+ * @param dim Dimension of manifold
+ */
+template <typename T>
+GFN_DEVICE void normalize_christoffel_structure(T* gamma, int dim) {
+    // Average with transpose to enforce approximate symmetry
+    for (int i = 0; i < dim; ++i) {
+        for (int j = i + 1; j < dim; ++j) {
+            T avg = static_cast<T>(0.5) * (gamma[i * dim + j] + gamma[j * dim + i]);
+            gamma[i * dim + j] = avg;
+            gamma[j * dim + i] = avg;
+        }
+    }
+}
+
+/**
  * Core Christoffel symbol computation using low-rank decomposition.
  * 
  * Computes: Γ(v,v) = Σ_r (h_r^2 * W_r) * S * M
@@ -36,94 +59,97 @@ namespace cuda {
  * @param r Toroidal minor radius
  * @param gamma Output Christoffel force [dim]
  */
+template <typename T>
 GFN_DEVICE void christoffel_device(
-    const scalar_t* v,
-    const scalar_t* U,
-    const scalar_t* W,
-    const scalar_t* x,
-    const scalar_t* V_w,
+    const T* v,
+    const T* U,
+    const T* W,
+    const T* x,
+    const T* V_w,
     int dim,
     int rank,
-    scalar_t plasticity,
-    scalar_t sing_thresh,
-    scalar_t sing_strength,
+    T plasticity,
+    T sing_thresh,
+    T sing_strength,
     Topology topology,
-    scalar_t R,
-    scalar_t r,
-    scalar_t* gamma
+    T R,
+    T r,
+    T* gamma
 ) {
-    if (topology == Topology::TORUS && x != nullptr) {
-        for (int i = 0; i < dim; ++i) gamma[i] = 0.0f;
+    if (topology == Topology::TORUS && x != nullptr && V_w == nullptr) {
+        for (int i = 0; i < dim; ++i) gamma[i] = static_cast<T>(0);
         for (int i = 0; i < dim - 1; i += 2) {
-            scalar_t th = x[i];
-            scalar_t v_th = v[i];
-            scalar_t v_ph = v[i + 1];
-            scalar_t denom = fmax(R + r * cosf(th), CLAMP_MIN_STRONG);
-            scalar_t term_th = denom * sinf(th) / (r + EPSILON_SMOOTH);
+            T th = x[i];
+            T v_th = v[i];
+            T v_ph = v[i + 1];
+            T denom = fmax(R + r * cos(th), static_cast<T>(CLAMP_MIN_STRONG<T>));
+            T term_th = denom * sin(th) / (r + static_cast<T>(EPSILON_SMOOTH<T>));
             gamma[i] = term_th * (v_ph * v_ph);
-            scalar_t term_ph = -(r * sinf(th)) / (denom + EPSILON_SMOOTH);
-            gamma[i + 1] = 2.0f * term_ph * v_ph * v_th;
+            T term_ph = -(r * sin(th)) / (denom + static_cast<T>(EPSILON_SMOOTH<T>));
+            gamma[i + 1] = static_cast<T>(2) * term_ph * v_ph * v_th;
         }
         for (int i = 0; i < dim; ++i) {
-            gamma[i] = soft_clamp(gamma[i] * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+            gamma[i] = soft_clamp<T>(gamma[i] * static_cast<T>(TOROIDAL_CURVATURE_SCALE<T>), static_cast<T>(CURVATURE_CLAMP<T>));
         }
         return;
     }
-    scalar_t h[64];
-    scalar_t h_sq[64];
+    T h[64];
+    T h_sq[64];
     for (int i = 0; i < rank; ++i) {
-        scalar_t sum = 0.0f;
+        T sum = static_cast<T>(0);
         for (int j = 0; j < dim; ++j) {
             sum += U[j * rank + i] * v[j];
         }
         h[i] = sum;
     }
-    scalar_t energy = 0.0f;
+    T energy = static_cast<T>(0);
     for (int i = 0; i < rank; ++i) {
         energy += h[i] * h[i];
     }
     // AUDIT FIX: Normalize energy by rank to match Python ops.py
-    if (rank > 0) energy /= static_cast<scalar_t>(rank);
+    if (rank > 0) energy /= static_cast<T>(rank);
     
-    scalar_t norm = sqrt(energy);
-    scalar_t S = 1.0f / (1.0f + norm + EPSILON_STANDARD);
-    scalar_t M = 1.0f;
-    if (plasticity != 0.0f) {
-        scalar_t v_energy = 0.0f;
+    T norm_val = sqrt(energy);
+    // AUDIT FIX: Use EPSILON_STRONG to match Python lowrank.py line 139
+    T S = static_cast<T>(1) / (static_cast<T>(1) + norm_val + static_cast<T>(EPSILON_STRONG<T>));
+    T M = static_cast<T>(1);
+    if (plasticity != static_cast<T>(0)) {
+        T v_energy = static_cast<T>(0);
         for (int i = 0; i < dim; ++i) {
             v_energy += v[i] * v[i];
         }
-        v_energy /= static_cast<scalar_t>(dim);
+        v_energy /= static_cast<T>(dim);
         // AUDIT FIX: Add 0.1 factor to match Python ops.py
-        M *= (1.0f + plasticity * 0.1f * tanhf(v_energy));
+        M *= (static_cast<T>(1) + plasticity * static_cast<T>(0.1) * tanh(v_energy));
     }
     if (x != nullptr && V_w != nullptr) {
-        scalar_t pot = 0.0f;
+        T pot = static_cast<T>(0);
         if (topology == Topology::TORUS) {
             for (int i = 0; i < dim; ++i) {
-                pot += sinf(x[i]) * V_w[i];
+                pot += sin(x[i]) * V_w[i];
             }
         } else {
             for (int i = 0; i < dim; ++i) {
                 pot += x[i] * V_w[i];
             }
         }
-        scalar_t gate = sigmoid(pot);
-        scalar_t soft_m = sigmoid(SINGULARITY_GATE_SLOPE * (gate - sing_thresh));
-        M *= (1.0f + (sing_strength - 1.0f) * soft_m);
+        T gate = sigmoid<T>(pot);
+        T soft_m = sigmoid<T>(static_cast<T>(SINGULARITY_GATE_SLOPE<T>) * (gate - sing_thresh));
+        M *= (static_cast<T>(1) + (sing_strength - static_cast<T>(1)) * soft_m);
     }
     for (int i = 0; i < rank; ++i) {
         h_sq[i] = h[i] * h[i] * S * M;
     }
     for (int i = 0; i < dim; ++i) {
-        scalar_t sum = 0.0f;
+        T sum = static_cast<T>(0);
         for (int j = 0; j < rank; ++j) {
             sum += W[i * rank + j] * h_sq[j];
         }
         gamma[i] = sum;
     }
+
     for (int i = 0; i < dim; ++i) {
-        gamma[i] = soft_clamp(gamma[i], CURVATURE_CLAMP);
+        gamma[i] = soft_clamp<T>(gamma[i], static_cast<T>(CURVATURE_CLAMP<T>));
     }
 }
 
@@ -147,34 +173,35 @@ GFN_DEVICE void christoffel_device(
  * @param v_norm_val Pre-computed velocity norm (optional, if available)
  * @param friction Output friction coefficients [dim]
  */
+template <typename T>
 GFN_DEVICE void compute_friction(
-    const scalar_t* x,
-    const scalar_t* force,
-    const scalar_t* W_forget,
-    const scalar_t* b_forget,
-    const scalar_t* W_input,
+    const T* x,
+    const T* force,
+    const T* W_forget,
+    const T* b_forget,
+    const T* W_input,
     int dim,
     Topology topology,
-    scalar_t velocity_friction_scale,
-    scalar_t v_norm_val,
-    scalar_t* friction
+    T velocity_friction_scale,
+    T v_norm_val,
+    T* friction
 ) {
-    scalar_t features[128]; // Max 2*dim for Fourier features
+    T features[128]; // Max 2*dim for Fourier features
     int feature_dim = dim;
     
     // Compute features based on topology
     if (topology == Topology::TORUS) {
         // Fourier features: [sin(x), cos(x)]
-        compute_fourier_features(features, x, dim);
+        compute_fourier_features<T>(features, x, dim);
         feature_dim = 2 * dim;
     } else {
         // Direct features
-        vector_copy(features, x, dim);
+        vector_copy<T>(features, x, dim);
     }
     
     // Compute gate activation: W_f * features + b_f
     for (int i = 0; i < dim; ++i) {
-        scalar_t gate_val = b_forget[i];
+        T gate_val = b_forget[i];
         for (int j = 0; j < feature_dim; ++j) {
             gate_val += W_forget[i * feature_dim + j] * features[j];
         }
@@ -186,13 +213,13 @@ GFN_DEVICE void compute_friction(
             }
         }
         
-        scalar_t base_friction = sigmoid(gate_val) * FRICTION_SCALE;
+        T base_friction = sigmoid<T>(gate_val) * static_cast<T>(FRICTION_SCALE<T>);
         
         // Apply velocity scaling: mu = mu_base * (1 + scale * |v|)
-        if (velocity_friction_scale > 0.0f) {
+        if (velocity_friction_scale > static_cast<T>(0)) {
             // Normalized by sqrt(dim) to be dimension-agnostic
-            scalar_t v_scale = v_norm_val / (sqrtf(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
-            friction[i] = base_friction * (1.0f + velocity_friction_scale * v_scale);
+            T v_scale = v_norm_val / (sqrt(static_cast<T>(dim)) + static_cast<T>(EPSILON_SMOOTH<T>));
+            friction[i] = base_friction * (static_cast<T>(1) + velocity_friction_scale * v_scale);
         } else {
             friction[i] = base_friction;
         }
@@ -207,32 +234,33 @@ GFN_DEVICE void compute_friction(
  * Compute combined Christoffel force with friction.
  * Output: Γ(v,v) + μ(x,F) * v
  */
+template <typename T>
 GFN_DEVICE void christoffel_with_friction(
-    const scalar_t* v,
-    const scalar_t* U,
-    const scalar_t* W,
-    const scalar_t* x,
-    const scalar_t* V_w,
-    const scalar_t* force,
-    const scalar_t* W_forget,
-    const scalar_t* b_forget,
-    const scalar_t* W_input,
+    const T* v,
+    const T* U,
+    const T* W,
+    const T* x,
+    const T* V_w,
+    const T* force,
+    const T* W_forget,
+    const T* b_forget,
+    const T* W_input,
     int dim,
     int rank,
-    scalar_t plasticity,
-    scalar_t sing_thresh,
-    scalar_t sing_strength,
+    T plasticity,
+    T sing_thresh,
+    T sing_strength,
     Topology topology,
-    scalar_t R,
-    scalar_t r,
-    scalar_t velocity_friction_scale,
-    scalar_t* output
+    T R,
+    T r,
+    T velocity_friction_scale,
+    T* output
 ) {
-    scalar_t gamma[64];
-    scalar_t friction[64];
+    T gamma[64];
+    T friction[64];
     
     // Compute Christoffel force
-    christoffel_device(
+    christoffel_device<T>(
         v, U, W, x, V_w, dim, rank,
         plasticity, sing_thresh, sing_strength,
         topology, R, r, gamma
@@ -241,15 +269,15 @@ GFN_DEVICE void christoffel_with_friction(
     // Compute friction if position is available
     if (x != nullptr && W_forget != nullptr && b_forget != nullptr) {
         // Calculate v_norm for friction scaling
-        scalar_t v_norm = 0.0f;
-        if (velocity_friction_scale > 0.0f) {
-            for(int i=0; i<dim; ++i) v_norm += v[i]*v[i];
-            v_norm = sqrtf(v_norm);
+        T v_norm_val = static_cast<T>(0);
+        if (velocity_friction_scale > static_cast<T>(0)) {
+            for(int i=0; i<dim; ++i) v_norm_val += v[i]*v[i];
+            v_norm_val = sqrt(v_norm_val);
         }
 
-        compute_friction(
+        compute_friction<T>(
             x, force, W_forget, b_forget, W_input,
-            dim, topology, velocity_friction_scale, v_norm, friction
+            dim, topology, velocity_friction_scale, v_norm_val, friction
         );
         
         // Add friction term: gamma + μ * v
@@ -258,7 +286,7 @@ GFN_DEVICE void christoffel_with_friction(
         }
     } else {
         // No friction, just copy gamma
-        vector_copy(output, gamma, dim);
+        vector_copy<T>(output, gamma, dim);
     }
 }
 
@@ -270,30 +298,31 @@ GFN_DEVICE void christoffel_with_friction(
  * Compute Christoffel and friction separately.
  * Used for implicit integration schemes (e.g., Leapfrog).
  */
+template <typename T>
 GFN_DEVICE void christoffel_friction_separate(
-    const scalar_t* v,
-    const scalar_t* U,
-    const scalar_t* W,
-    const scalar_t* x,
-    const scalar_t* V_w,
-    const scalar_t* force,
-    const scalar_t* W_forget,
-    const scalar_t* b_forget,
-    const scalar_t* W_input,
+    const T* v,
+    const T* U,
+    const T* W,
+    const T* x,
+    const T* V_w,
+    const T* force,
+    const T* W_forget,
+    const T* b_forget,
+    const T* W_input,
     int dim,
     int rank,
-    scalar_t plasticity,
-    scalar_t sing_thresh,
-    scalar_t sing_strength,
+    T plasticity,
+    T sing_thresh,
+    T sing_strength,
     Topology topology,
-    scalar_t R,
-    scalar_t r,
-    scalar_t velocity_friction_scale,
-    scalar_t* gamma,
-    scalar_t* friction
+    T R,
+    T r,
+    T velocity_friction_scale,
+    T* gamma,
+    T* friction
 ) {
     // Compute Christoffel force
-    christoffel_device(
+    christoffel_device<T>(
         v, U, W, x, V_w, dim, rank,
         plasticity, sing_thresh, sing_strength,
         topology, R, r, gamma
@@ -302,19 +331,19 @@ GFN_DEVICE void christoffel_friction_separate(
     // Compute friction if position is available
     if (x != nullptr && W_forget != nullptr && b_forget != nullptr) {
         // Calculate v_norm for friction scaling
-        scalar_t v_norm = 0.0f;
-        if (velocity_friction_scale > 0.0f) {
-            for(int i=0; i<dim; ++i) v_norm += v[i]*v[i];
-            v_norm = sqrtf(v_norm);
+        T v_norm_val = static_cast<T>(0);
+        if (velocity_friction_scale > static_cast<T>(0)) {
+            for(int i=0; i<dim; ++i) v_norm_val += v[i]*v[i];
+            v_norm_val = sqrt(v_norm_val);
         }
 
-        compute_friction(
+        compute_friction<T>(
             x, force, W_forget, b_forget, W_input,
-            dim, topology, velocity_friction_scale, v_norm, friction
+            dim, topology, velocity_friction_scale, v_norm_val, friction
         );
     } else {
         // No friction
-        vector_zero(friction, dim);
+        vector_zero<T>(friction, dim);
     }
 }
 
@@ -339,36 +368,38 @@ GFN_DEVICE void christoffel_friction_separate(
  * @param grad_W Output gradient w.r.t W [dim x rank]
  * @param grad_x Output gradient w.r.t x [dim] (optional)
  */
+template <typename T>
 GFN_DEVICE void christoffel_backward_device(
-    const scalar_t* grad_out,
-    const scalar_t* gamma,
-    const scalar_t* v,
-    const scalar_t* U,
-    const scalar_t* W,
-    const scalar_t* x,
-    const scalar_t* V_w,
+    const T* grad_out,
+    const T* gamma,
+    const T* v,
+    const T* U,
+    const T* W,
+    const T* x,
+    const T* V_w,
     int dim,
     int rank,
-    scalar_t plasticity,
-    scalar_t sing_thresh,
-    scalar_t sing_strength,
+    T plasticity,
+    T sing_thresh,
+    T sing_strength,
     Topology topology,
-    scalar_t R,
-    scalar_t r,
-    scalar_t* grad_v,
-    scalar_t* grad_U,
-    scalar_t* grad_W,
-    scalar_t* grad_x
+    T R,
+    T r,
+    T* grad_v,
+    T* grad_U,
+    T* grad_W,
+    T* grad_x,
+    T* grad_V_w = nullptr
 ) {
     // Thread-local storage (max rank 64, max dim 128 supported)
-    scalar_t h[64];
-    scalar_t grad_h[64];
-    scalar_t grad_q[64];  // Gradient w.r.t h^2
+    T h[64];
+    T grad_h[64];
+    T grad_q[64];  // Gradient w.r.t h^2
     
     // 1. Re-compute forward state h = U^T * v and modulate factor M
-    scalar_t h_energy = 0.0;
+    T h_energy = static_cast<T>(0);
     for (int i = 0; i < rank; ++i) {
-        scalar_t sum = 0.0;
+        T sum = static_cast<T>(0);
         for (int j = 0; j < dim; ++j) {
             sum += U[j * rank + i] * v[j];
         }
@@ -376,48 +407,49 @@ GFN_DEVICE void christoffel_backward_device(
         h_energy += sum * sum;
     }
     if (rank > 0) {
-        h_energy /= static_cast<scalar_t>(rank);
+        h_energy /= static_cast<T>(rank);
     }
     
-    scalar_t norm = sqrt(h_energy);
-    scalar_t S = 1.0f / (1.0f + norm + EPSILON_STANDARD);
+    T norm_val = sqrt(h_energy);
+    // AUDIT FIX: Use EPSILON_STRONG to match forward pass (line 114)
+    T S = static_cast<T>(1) / (static_cast<T>(1) + norm_val + static_cast<T>(EPSILON_STRONG<T>));
     
     // 1b. Re-compute Modulation M
-    scalar_t M_plas = 1.0;
-    scalar_t v_energy = 0.0;
-    if (plasticity != 0.0) {
+    T M_plas = static_cast<T>(1);
+    T v_energy = static_cast<T>(0);
+    if (plasticity != static_cast<T>(0)) {
         for (int i = 0; i < dim; ++i) v_energy += v[i] * v[i];
-        v_energy /= static_cast<scalar_t>(dim);
-        M_plas = (1.0 + plasticity * 0.1 * tanh(v_energy));
+        v_energy /= static_cast<T>(dim);
+        M_plas = (static_cast<T>(1) + plasticity * static_cast<T>(0.1) * tanh(v_energy));
     }
     
-    scalar_t M_sing = 1.0;
-    scalar_t gate = 0.0, soft_m = 0.0;
+    T M_sing = static_cast<T>(1);
+    T gate = static_cast<T>(0), soft_m = static_cast<T>(0);
     if (x != nullptr && V_w != nullptr) {
-        scalar_t pot = 0.0;
+        T pot = static_cast<T>(0);
         if (topology == Topology::TORUS) {
             for (int i = 0; i < dim; ++i) pot += sin(x[i]) * V_w[i];
         } else {
             for (int i = 0; i < dim; ++i) pot += x[i] * V_w[i];
         }
-        gate = sigmoid(pot);
-        soft_m = sigmoid(SINGULARITY_GATE_SLOPE * (gate - sing_thresh));
-        M_sing = (1.0f + (sing_strength - 1.0f) * soft_m);
+        gate = sigmoid<T>(pot);
+        soft_m = sigmoid<T>(static_cast<T>(SINGULARITY_GATE_SLOPE<T>) * (gate - sing_thresh));
+        M_sing = (static_cast<T>(1) + (sing_strength - static_cast<T>(1)) * soft_m);
     }
-    scalar_t M = M_plas * M_sing;
+    T M = M_plas * M_sing;
 
     // 2. Correct grad_out for soft_clamp derivative
     // d_clamped / d_raw = 1 - (clamped / 20)^2
-    scalar_t grad_raw[128];
+    T grad_raw[128];
     for (int i = 0; i < dim; ++i) {
-        scalar_t t = gamma[i] / CURVATURE_CLAMP;
-        grad_raw[i] = grad_out[i] * (1.0 - t * t);
+        T t = gamma[i] / static_cast<T>(CURVATURE_CLAMP<T>);
+        grad_raw[i] = grad_out[i] * (static_cast<T>(1) - t * t);
     }
     
     // 3. Gradient w.r.t W and intermediate grad_q
     for (int j = 0; j < rank; ++j) {
-        grad_q[j] = 0.0;
-        scalar_t q_base = h[j] * h[j] * S * M;
+        grad_q[j] = static_cast<T>(0);
+        T q_base = h[j] * h[j] * S * M;
         for (int i = 0; i < dim; ++i) {
             grad_W[i * rank + j] += grad_raw[i] * q_base;
             grad_q[j] += W[i * rank + j] * grad_raw[i];
@@ -425,13 +457,16 @@ GFN_DEVICE void christoffel_backward_device(
     }
     
     // 4. Gradient w.r.t h (accounting for stabilization S)
-    scalar_t sum_grad_q_h_sq = 0.0;
+    T sum_grad_q_h_sq = static_cast<T>(0);
     for (int i = 0; i < rank; ++i) {
         sum_grad_q_h_sq += grad_q[i] * h[i] * h[i];
     }
-    
-    scalar_t S_sq_M_norm = (norm > 1e-8) ? (M * S * S / norm) : 0.0;
-    scalar_t two_S_M = 2.0 * S * M;
+
+    // AUDIT FIX: Divide by (norm_val * rank) to match Python autograd.py
+    // Python: denom = norm * max(1, rank), scale = M * S * S / denom
+    T S_sq_M_norm = (norm_val > EPSILON_STANDARD<T> && rank > 0) ?
+        (M * S * S / (norm_val * static_cast<T>(rank))) : static_cast<T>(0);
+    T two_S_M = static_cast<T>(2) * S * M;
     
     for (int i = 0; i < rank; ++i) {
         grad_h[i] = grad_q[i] * h[i] * two_S_M - sum_grad_q_h_sq * S_sq_M_norm * h[i];
@@ -446,28 +481,34 @@ GFN_DEVICE void christoffel_backward_device(
     }
     
     // 6. Plasticity contribution to grad_v
-    if (plasticity != 0.0) {
+    if (plasticity != static_cast<T>(0)) {
         // dL/dM_plas = sum_i grad_q[i] * h[i]^2 * S * M_sing
-        scalar_t dL_dM_plas = sum_grad_q_h_sq * S * M_sing;
-        scalar_t tanh_v = tanh(v_energy);
-        scalar_t sech_sq = 1.0 - tanh_v * tanh_v;
-        scalar_t factor = dL_dM_plas * (plasticity * 0.1) * sech_sq * (2.0 / static_cast<scalar_t>(dim));
+        T dL_dM_plas = sum_grad_q_h_sq * S * M_sing;
+        T tanh_v = tanh(v_energy);
+        T sech_sq = static_cast<T>(1) - tanh_v * tanh_v;
+        T factor = dL_dM_plas * (plasticity * static_cast<T>(0.1)) * sech_sq * (static_cast<T>(2) / static_cast<T>(dim));
         for (int i = 0; i < dim; ++i) {
             grad_v[i] += factor * v[i];
         }
     }
     
-    // 7. Singularity contribution to grad_x
-    if (grad_x != nullptr && x != nullptr && V_w != nullptr) {
-        scalar_t dL_dM_sing = sum_grad_q_h_sq * S * M_plas;
-        scalar_t dM_dsoft = (sing_strength - 1.0);
-        scalar_t dsoft_dgate = SINGULARITY_GATE_SLOPE * soft_m * (1.0f - soft_m);
-        scalar_t dgate_dpot = gate * (1.0f - gate);
-        scalar_t factor = dL_dM_sing * dM_dsoft * dsoft_dgate * dgate_dpot;
+    // 7. Singularity contribution to grad_x and grad_V_w
+    if ((grad_x != nullptr || grad_V_w != nullptr) && x != nullptr && V_w != nullptr) {
+        T dL_dM_sing = sum_grad_q_h_sq * S * M_plas;
+        T dM_dsoft = (sing_strength - static_cast<T>(1));
+        T dsoft_dgate = static_cast<T>(SINGULARITY_GATE_SLOPE<T>) * soft_m * (static_cast<T>(1) - soft_m);
+        T dgate_dpot = gate * (static_cast<T>(1) - gate);
+        T factor = dL_dM_sing * dM_dsoft * dsoft_dgate * dgate_dpot;
         
         for (int i = 0; i < dim; ++i) {
-            scalar_t dpot_dxi = (topology == Topology::TORUS) ? cos(x[i]) * V_w[i] : V_w[i];
-            grad_x[i] += factor * dpot_dxi;
+            if (grad_x != nullptr) {
+                T dpot_dxi = (topology == Topology::TORUS) ? cos(x[i]) * V_w[i] : V_w[i];
+                grad_x[i] += factor * dpot_dxi;
+            }
+            if (grad_V_w != nullptr) {
+                T dpot_dVwi = (topology == Topology::TORUS) ? sin(x[i]) : x[i];
+                grad_V_w[i] += factor * dpot_dVwi;
+            }
         }
     }
 }
@@ -477,34 +518,35 @@ GFN_DEVICE void christoffel_backward_device(
  * 
  * Computes gradients: dL/dW_forget, dL/db_forget, dL/dx.
  */
+template <typename T>
 GFN_DEVICE void friction_backward_device(
-    const scalar_t* grad_out,
-    const scalar_t* x,
-    const scalar_t* force,
-    const scalar_t* W_forget,
-    const scalar_t* b_forget,
-    const scalar_t* W_input,
+    const T* grad_out,
+    const T* x,
+    const T* force,
+    const T* W_forget,
+    const T* b_forget,
+    const T* W_input,
     int dim,
     Topology topology,
-    scalar_t* grad_W_forget,
-    scalar_t* grad_b_forget,
-    scalar_t* grad_W_input,
-    scalar_t* grad_x,
-    scalar_t* grad_force
+    T* grad_W_forget,
+    T* grad_b_forget,
+    T* grad_W_input,
+    T* grad_x,
+    T* grad_force
 ) {
-    scalar_t features[128];
+    T features[128];
     int feature_dim = (topology == Topology::TORUS) ? 2 * dim : dim;
     
     // Re-compute features
     if (topology == Topology::TORUS) {
-        compute_fourier_features(features, x, dim);
+        compute_fourier_features<T>(features, x, dim);
     } else {
-        vector_copy(features, x, dim);
+        vector_copy<T>(features, x, dim);
     }
     
     // Gradient w.r.t. gate pre-activation z: mu = sigmoid(z) * scale
     for (int i = 0; i < dim; ++i) {
-        scalar_t z = b_forget[i];
+        T z = b_forget[i];
         for (int j = 0; j < feature_dim; ++j) {
             z += W_forget[i * feature_dim + j] * features[j];
         }
@@ -515,8 +557,8 @@ GFN_DEVICE void friction_backward_device(
             }
         }
         
-        scalar_t s = sigmoid(z);
-        scalar_t dz = grad_out[i] * FRICTION_SCALE * s * (1.0f - s);
+        T s = sigmoid<T>(z);
+        T dz = grad_out[i] * static_cast<T>(FRICTION_SCALE<T>) * s * (static_cast<T>(1) - s);
         
         // Accumulate gradients for weights and bias
         grad_b_forget[i] += dz;
@@ -537,8 +579,8 @@ GFN_DEVICE void friction_backward_device(
         // Propagate to features
         if (topology == Topology::TORUS) {
             for (int j = 0; j < dim; ++j) {
-                scalar_t d_sin = W_forget[i * feature_dim + j] * dz;
-                scalar_t d_cos = W_forget[i * feature_dim + (dim + j)] * dz;
+                T d_sin = W_forget[i * feature_dim + j] * dz;
+                T d_cos = W_forget[i * feature_dim + (dim + j)] * dz;
                 grad_x[j] += d_sin * cos(x[j]) - d_cos * sin(x[j]);
             }
         } else {

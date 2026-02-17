@@ -27,7 +27,7 @@ GFN_DEVICE void matvec(
     int n
 ) {
     for (int i = 0; i < m; ++i) {
-        T sum = 0.0f;
+        T sum = static_cast<T>(0);
         for (int j = 0; j < n; ++j) {
             sum += A[i * n + j] * x[j];
         }
@@ -48,7 +48,7 @@ GFN_DEVICE void matvec_transpose(
     int n
 ) {
     for (int j = 0; j < n; ++j) {
-        T sum = 0.0f;
+        T sum = static_cast<T>(0);
         for (int i = 0; i < m; ++i) {
             sum += A[i * n + j] * x[i];
         }

@@ -1,4 +1,4 @@
-﻿"""
+﻿﻿"""
 Test Utilities for CUDA Test Suite
 Shared utilities for creating test data, comparing results, and measuring convergence.
 """
@@ -69,13 +69,13 @@ def create_matched_christoffel(
         dim=dim,
         rank=rank,
         physics_config=physics_config
-    ).to(device)
+    ).to(device=device, dtype=dtype)
     
     # Generate random weights
     U = torch.randn(dim, rank, device=device, dtype=dtype)
     W = torch.randn(dim, rank, device=device, dtype=dtype)
     
-    # Set weights
+    # Set weights (match dtype and device exactly)
     christ_py.U.data = U.clone()
     christ_py.W.data = W.clone()
     

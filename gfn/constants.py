@@ -91,20 +91,20 @@ DEFAULT_FRICTION = 0.002  # Was 0.005
 # ============================================================================
 
 # Epsilon for division safety (strong protection)
-# OPTIMIZED: 1e-7 for better gradient flow while maintaining stability
-EPSILON_STRONG = 1e-7  # Was 1e-8 - Better balance
+# PARITY FIX: Must match CUDA types.cuh exactly (1e-8)
+EPSILON_STRONG = 1e-8
 
 # Epsilon for division safety (standard protection)
-EPSILON_STANDARD = 1e-7  # Was 1e-8 - Match strong for consistency
+EPSILON_STANDARD = 1e-8
 
 # Epsilon for gradient smoothing
-EPSILON_SMOOTH = 1e-7
+EPSILON_SMOOTH = 1e-8
 
 # Minimum clamping value for denominators
-CLAMP_MIN_STRONG = 1e-7
+CLAMP_MIN_STRONG = 1e-8
 
 # Standard clamping minimum
-CLAMP_MIN_STANDARD = 1e-7
+CLAMP_MIN_STANDARD = 1e-8
 
 
 # ============================================================================

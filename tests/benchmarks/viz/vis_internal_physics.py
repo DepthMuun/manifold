@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from gfn.model import Manifold
-from tests.benchmarks.bench_utils import ResultsLogger, PerformanceStats
+from tests.benchmarks.infra.utils import ResultsLogger, PerformanceStats
 
 def analyze_model_internals(checkpoint_path=None, input_text="999 + 1 = 1000"):
     logger = ResultsLogger("internal_physics", category="viz")

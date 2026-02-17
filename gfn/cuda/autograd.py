@@ -277,25 +277,21 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             except (ImportError, AttributeError):
                 pass
         
-        # Fallback to PyTorch autograd
-        # Reconstruct output if necessary
         if gamma is None:
             from .ops import ChristoffelOperation
             op = ChristoffelOperation({
-                'curvature_clamp': 3.0,
-                'epsilon': 1e-8,
-                'singularity_gate_slope': 1.0
+                'curvature_clamp': CudaConstants.CURVATURE_CLAMP,
+                'epsilon': CudaConstants.EPSILON_STANDARD,
+                'singularity_gate_slope': CudaConstants.SINGULARITY_GATE_SLOPE
             })
             gamma = op.forward(v, U, W, x, V_w, ctx.plasticity, ctx.sing_thresh, ctx.sing_strength, ctx.topology)
         
-        # Calculate gradients using autograd
         grad_inputs = torch.autograd.grad(
             gamma, [v, U, W, x, V_w], grad_output,
             allow_unused=True,
             retain_graph=False
         )
         
-        # Fill with zeros where necessary
         result = []
         for i, (tensor, grad) in enumerate([
             (v, grad_inputs[0]),
@@ -305,16 +301,14 @@ class ChristoffelAutogradFunction(torch.autograd.Function):
             (V_w, grad_inputs[4])
         ]):
             if grad is None:
-                if tensor.numel() > 0:
+                if tensor is not None and tensor.numel() > 0:
                     result.append(torch.zeros_like(tensor))
                 else:
                     result.append(None)
             else:
                 result.append(grad)
         
-        # Add None gradients for non-differentiable parameters
         result.extend([None, None, None, None, None, None])
-        
         return tuple(result)
 
 
@@ -331,8 +325,9 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 dt: float, dt_scale: float, steps: int,
                 topology: int,
                 Wf: Optional[torch.Tensor], bf: Optional[torch.Tensor],
-                W_input: Optional[torch.Tensor],
                 plasticity: float, sing_thresh: float, sing_strength: float, R: float, r: float,
+                W_input: Optional[torch.Tensor],
+                V_w: Optional[torch.Tensor],
                 velocity_friction_scale: float,
                 hysteresis_state: torch.Tensor,
                 hyst_update_w: torch.Tensor,
@@ -349,6 +344,8 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
         # Ensure contiguity
         x = x.contiguous()
         v = v.contiguous()
+        if force is None:
+            force = torch.zeros_like(x)
         force = force.contiguous()
         U = U.contiguous()
         W = W.contiguous()
@@ -366,6 +363,11 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
             W_input = W_input.contiguous()
         else:
             W_input = torch.empty(0, device=x.device, dtype=x.dtype)
+            
+        if V_w is not None and V_w.numel() > 0:
+            V_w = V_w.contiguous()
+        else:
+            V_w = torch.empty(0, device=x.device, dtype=x.dtype)
         
         # Try using CUDA
         if is_cuda:
@@ -375,14 +377,14 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 x_out, v_out = gfn_cuda.leapfrog_fused(
                     x, v, force, U, W,
                     float(dt), float(dt_scale), int(steps), int(topology),
-                    Wf, bf, W_input,
+                    Wf, bf, W_input, V_w,
                     float(plasticity), float(sing_thresh), float(sing_strength), float(R), float(r),
                     float(velocity_friction_scale),
                     hysteresis_state, hyst_update_w, hyst_update_b,
                     hyst_readout_w, hyst_readout_b, float(hyst_decay), hyst_enabled
                 )
                 
-                ctx.save_for_backward(x, v, force, U, W, Wf, bf, x_out, v_out)
+                ctx.save_for_backward(x, v, force, U, W, Wf, bf, x_out, v_out, V_w)
                 ctx.dt = dt
                 ctx.dt_scale = dt_scale
                 ctx.steps = steps
@@ -439,9 +441,14 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
     def backward(ctx, grad_x_out: torch.Tensor, grad_v_out: torch.Tensor) -> Tuple:
         """
         Leapfrog integrator backward pass.
+        Returns gradients for all 26 forward arguments.
         """
         saved = ctx.saved_tensors
-        x, v, force, U, W, Wf, bf, x_out, v_out = saved
+        x, v, force, U, W, Wf, bf, x_out, v_out, V_w = saved
+        
+        # 0:ctx, 1:x, 2:v, 3:f, 4:U, 5:W, 6:dt, 7:dt_s, 8:steps, 9:topo, 
+        # 10:Wf, 11:bf, 12:plas, 13:th, 14:st, 15:R, 16:r, 17:Wi, 18:Vw, 19:vf
+        # 20:h_s, 21:h_up_w, 22:h_up_b, 23:h_rd_w, 24:h_rd_b, 25:h_dec, 26:h_en
         
         if getattr(ctx, 'is_cuda', False):
             try:
@@ -449,7 +456,7 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 
                 grads = gfn_cuda.leapfrog_backward_fused(
                     grad_x_out.contiguous(), grad_v_out.contiguous(),
-                    x, v, force, U, W, Wf, bf, ctx.W_input,
+                    x, v, force, U, W, Wf, bf, ctx.W_input, V_w,
                     float(ctx.dt), float(ctx.dt_scale), int(ctx.steps), int(ctx.topology),
                     float(ctx.plasticity), float(ctx.sing_thresh), float(ctx.sing_strength), float(ctx.R), float(ctx.r),
                     float(ctx.velocity_friction_scale),
@@ -457,16 +464,22 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                     ctx.hyst_readout_w, ctx.hyst_readout_b, float(ctx.hyst_decay), ctx.hyst_enabled
                 )
                 
-                # AUDIT FIX: Unpack hysteresis gradients (now 11 outputs instead of 7)
-                return (grads[0], grads[1], grads[2], grads[3], grads[4],
-                        None, None, None, None, grads[5], grads[6], None, None, None, None, None,
-                        grads[7], grads[8], grads[9], grads[10], None, None, None)
+                # Unpack and map (grads returns 13 elements from CUDA)
+                return (grads[0], grads[1], grads[2], grads[3], grads[4], # 1-5
+                        None, None, None, None,                          # 6-9
+                        grads[5], grads[6],                              # 10-11 (Wf, bf)
+                        None, None, None, None, None,                    # 12-16 (scalars)
+                        grads[7], grads[8],                              # 17-18 (Wi, Vw)
+                        None,                                            # 19 (vf)
+                        None,                                            # 20 (h_s)
+                        grads[9], grads[10], grads[11], grads[12],       # 21-24 (h_params)
+                        None, None)                                      # 25-26
                 
             except (ImportError, AttributeError):
                 pass
         
         # Fallback: use PyTorch autograd
-        def leapfrog_fn(x_in, v_in):
+        def leapfrog_fn(x_in, v_in, force_in, U_in, W_in, Wf_in, bf_in, W_input_in, V_w_in):
             from .ops import LeapfrogOperation
             op = LeapfrogOperation({
                 'dt': ctx.dt,
@@ -474,32 +487,40 @@ class LeapfrogAutogradFunction(torch.autograd.Function):
                 'epsilon': CudaConstants.EPSILON_STANDARD,
                 'curvature_clamp': CudaConstants.CURVATURE_CLAMP
             })
-            return op.forward(x_in, v_in, force, U, W, ctx.dt_scale, ctx.steps,
-                            ctx.topology, Wf, bf, ctx.plasticity, ctx.sing_thresh, ctx.sing_strength)
+            return op.forward(
+                x_in, v_in, force_in, U_in, W_in, ctx.dt_scale, ctx.steps,
+                ctx.topology,
+                Wf_in if Wf_in.numel() > 0 else None,
+                bf_in if bf_in.numel() > 0 else None,
+                W_input_in if W_input_in.numel() > 0 else None,
+                ctx.plasticity, ctx.sing_thresh, ctx.sing_strength,
+                V_w_in if V_w_in.numel() > 0 else None,
+                ctx.velocity_friction_scale
+            )
         
         grads = torch.autograd.grad(
-            leapfrog_fn(x, v),
-            [x, v, force, U, W],
+            leapfrog_fn(x, v, force, U, W, Wf, bf, ctx.W_input, V_w),
+            [x, v, force, U, W, Wf, bf, ctx.W_input, V_w],
             (grad_x_out, grad_v_out),
             allow_unused=True,
             retain_graph=False
         )
         
-        # Complete result
-        result = []
-        for i, (tensor, grad) in enumerate([
-            (x, grads[0]), (v, grads[1]), (force, grads[2]),
-            (U, grads[3]), (W, grads[4])
-        ]):
-            result.append(grad if grad is not None else torch.zeros_like(tensor))
-        
-        # Additional parameters
-        result.extend([None, None, None, None,  # dt, dt_scale, steps, topology
-                       grads[5] if len(grads) > 5 else torch.zeros_like(Wf) if Wf.numel() > 0 else None,
-                       grads[6] if len(grads) > 6 else torch.zeros_like(bf) if bf.numel() > 0 else None,
-                       None, None, None, None, None])  # plasticity, sing_thresh, sing_strength, R, r
-        
-        return tuple(result)
+        # Return exactly 26 values for PyTorch Fallback
+        return (grads[0] if grads[0] is not None else torch.zeros_like(x),
+                grads[1] if grads[1] is not None else torch.zeros_like(v),
+                grads[2] if grads[2] is not None else torch.zeros_like(force),
+                grads[3] if grads[3] is not None else torch.zeros_like(U),
+                grads[4] if grads[4] is not None else torch.zeros_like(W),
+                None, None, None, None,                          # 6-9
+                grads[5] if grads[5] is not None else torch.zeros_like(Wf) if Wf.numel() > 0 else None,
+                grads[6] if grads[6] is not None else torch.zeros_like(bf) if bf.numel() > 0 else None,
+                None, None, None, None, None,                    # 12-16
+                grads[7] if grads[7] is not None else torch.zeros_like(ctx.W_input) if ctx.W_input.numel() > 0 else None,
+                grads[8] if grads[8] is not None else torch.zeros_like(V_w) if V_w.numel() > 0 else None,
+                None,                                            # 19
+                None, None, None, None, None,                    # 20-24
+                None, None)                                      # 25-26
 
 
 # ============================================================================
@@ -550,12 +571,13 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
                             topology: int = 0,
                             Wf: Optional[torch.Tensor] = None,
                             bf: Optional[torch.Tensor] = None,
-                            W_input: Optional[torch.Tensor] = None,
                             plasticity: float = 0.0,
                             sing_thresh: float = 0.5,
                             sing_strength: float = 2.0,
                             R: float = 2.0,
                             r: float = 1.0,
+                            W_input: Optional[torch.Tensor] = None,
+                            V_w: Optional[torch.Tensor] = None,
                             velocity_friction_scale: float = 0.0,
                             # AUDIT FIX (Component 7): Hysteresis parameters with defaults
                             hysteresis_state: Optional[torch.Tensor] = None,
@@ -567,50 +589,32 @@ def leapfrog_fused_autograd(x: torch.Tensor, v: torch.Tensor, force: torch.Tenso
                             hyst_enabled: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Integrates Hamiltonian system with autograd support.
-    
-    Args:
-        x: Positions [B, D]
-        v: Velocities [B, D]
-        force: External forces [B, D]
-        U, W: Christoffel matrices
-        dt: Base time step
-        dt_scale: dt scale
-        steps: Number of substeps
-        topology: Topology type
-        Wf, bf: Friction weights
-        plasticity: Curvature plasticity
-        R, r: Torus radii
-        hysteresis_state: Initial hysteresis state [B, D]
-        hyst_update_w, hyst_update_b: Update parameters
-        hyst_readout_w, hyst_readout_b: Readout parameters
-        hyst_decay: Hysteresis decay
-        hyst_enabled: Enable hysteresis
-    
-    Returns:
-        x_out, v_out: Updated states
     """
-    if Wf is None:
+    if Wf is None or not torch.is_tensor(Wf):
         Wf = torch.empty(0, device=x.device, dtype=x.dtype)
-    if bf is None:
+    if bf is None or not torch.is_tensor(bf):
         bf = torch.empty(0, device=x.device, dtype=x.dtype)
-    if W_input is None:
+    if W_input is None or not torch.is_tensor(W_input):
         W_input = torch.empty(0, device=x.device, dtype=x.dtype)
+    if V_w is None or not torch.is_tensor(V_w):
+        V_w = torch.empty(0, device=x.device, dtype=x.dtype)
     
     # AUDIT FIX: Prepare hysteresis tensors
-    if hysteresis_state is None:
+    if hysteresis_state is None or not torch.is_tensor(hysteresis_state):
         hysteresis_state = torch.empty(0, device=x.device, dtype=x.dtype)
-    if hyst_update_w is None:
+    if hyst_update_w is None or not torch.is_tensor(hyst_update_w):
         hyst_update_w = torch.empty(0, device=x.device, dtype=x.dtype)
-    if hyst_update_b is None:
+    if hyst_update_b is None or not torch.is_tensor(hyst_update_b):
         hyst_update_b = torch.empty(0, device=x.device, dtype=x.dtype)
-    if hyst_readout_w is None:
+    if hyst_readout_w is None or not torch.is_tensor(hyst_readout_w):
         hyst_readout_w = torch.empty(0, device=x.device, dtype=x.dtype)
-    if hyst_readout_b is None:
+    if hyst_readout_b is None or not torch.is_tensor(hyst_readout_b):
         hyst_readout_b = torch.empty(0, device=x.device, dtype=x.dtype)
     
     return LeapfrogAutogradFunction.apply(
-        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, W_input,
-        plasticity, sing_thresh, sing_strength, R, r, velocity_friction_scale,
+        x, v, force, U, W, dt, dt_scale, steps, topology, Wf, bf, 
+        plasticity, sing_thresh, sing_strength, R, r,
+        W_input, V_w, velocity_friction_scale,
         hysteresis_state, hyst_update_w, hyst_update_b, hyst_readout_w, hyst_readout_b,
         hyst_decay, hyst_enabled
     )
@@ -632,44 +636,235 @@ def recurrent_manifold_fused_autograd(x: torch.Tensor, v: torch.Tensor, f: torch
                                        topology: int = 0,
                                        R: float = 2.0, r: float = 1.0,
                                        **kwargs) -> Tuple:
+    """
+    Autograd fallback for recurrent manifold processing.
+    Now supports full physics suite: Friction Gates, Torus, Hysteresis.
+    """
     device = x.device
-    B, D = x.shape
+    B, D_total = x.shape
     T = f.shape[1]
-    num_layers = U_stack.shape[0] // num_heads
-    head_dim = D // num_heads
-    x_curr = x
-    v_curr = v
+    head_dim = D_total // num_heads
+    num_layers = U_stack.shape[0] // num_heads # Should be 1 for a single MLayer
+    
+    x_curr = x.clone()
+    v_curr = v.clone()
     x_seq = []
-    U_reshaped = U_stack.view(num_layers, num_heads, head_dim, -1)
-    W_reshaped = W_stack.view(num_layers, num_heads, head_dim, -1).permute(0, 1, 3, 2)
+    
+    # Hysteresis state initialization
+    h_state = kwargs.get('hysteresis_state')
+    if h_state is None and kwargs.get('hyst_enabled', False):
+        h_state = torch.zeros_like(x)
+    
+    # Try using CUDA
+    if x.is_cuda:
+        try:
+            import gfn_cuda
+            
+            # Prepare optional tensors
+            wf = Wf if Wf is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            bf_val = bf if bf is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            wi = Wi if Wi is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            
+            h_up_w = kwargs.get('hyst_update_w', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_up_b = kwargs.get('hyst_update_b', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_rd_w = kwargs.get('hyst_readout_w', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_rd_b = kwargs.get('hyst_readout_b', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_decay = float(kwargs.get('hyst_decay', 0.9))
+            h_enabled = bool(kwargs.get('hyst_enabled', False))
+            v_fric_scale = float(kwargs.get('velocity_friction_scale', 0.0))
+            
+            # Singularity Vector (Phase 2)
+            v_w = kwargs.get('V_w', torch.empty(0, device=x.device, dtype=x.dtype))
+
+            # Geometry Fusion (New in Phase 2)
+            thermo_a = float(kwargs.get('thermo_alpha', 0.0))
+            thermo_t = float(kwargs.get('thermo_temp', 1.0))
+            h_z = kwargs.get('holographic_z', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_gz = kwargs.get('holographic_grad_z', torch.empty(0, device=x.device, dtype=x.dtype))
+
+            # Unified kernel provides 100% parity including Torus, Gating, Hysteresis and Fused Geometry
+            x_f, v_f, x_s = gfn_cuda.unified_mlayer_fused(
+                x.contiguous(), v.contiguous(), f.contiguous(),
+                U_stack.contiguous(), W_stack.contiguous(),
+                wf.contiguous(), bf_val.contiguous(), wi.contiguous(),
+                v_w.contiguous(),
+                float(dt), dt_scales.contiguous(), int(topology),
+                float(plasticity), float(sing_thresh), float(sing_strength),
+                float(R), float(r), v_fric_scale,
+                thermo_a, thermo_t, h_z.contiguous(), h_gz.contiguous(),
+                h_state.contiguous(), h_up_w.contiguous(), h_up_b.contiguous(),
+                h_rd_w.contiguous(), h_rd_b.contiguous(),
+                h_decay, h_enabled
+            )
+            
+            return x_f, v_f, x_s, torch.zeros((), device=device), h_state
+            
+        except (ImportError, AttributeError):
+            pass
+    
+    # Reshape weights for head-parallel processing
+    # U: [H, D_h, R], W: [H, R, D_h]
+    U_heads = U_stack.view(num_heads, head_dim, -1)
+    W_heads = W_stack.view(num_heads, head_dim, -1).permute(0, 2, 1)
+    
+    # Friction gates
+    if Wf is not None:
+        Wf_heads = Wf.view(num_heads, head_dim, -1)
+        bf_heads = bf.view(num_heads, head_dim) if bf is not None else None
+        Wi_heads = Wi.view(num_heads, head_dim, head_dim) if Wi is not None else None
+    
+    # Hysteresis parameters
+    hyst_enabled = kwargs.get('hyst_enabled', False)
+    if hyst_enabled:
+        h_up_w = kwargs.get('hyst_update_w')
+        h_up_b = kwargs.get('hyst_update_b')
+        h_rd_w = kwargs.get('hyst_readout_w')
+        h_rd_b = kwargs.get('hyst_readout_b')
+        h_decay = kwargs.get('hyst_decay', 0.9)
+        
     for t in range(T):
-        force_t = f[:, t]
-        x_heads = x_curr.view(B, num_heads, head_dim)
-        v_heads = v_curr.view(B, num_heads, head_dim)
-        f_heads = force_t.view(B, num_heads, head_dim)
-        for layer_idx in range(num_layers):
-            U_l = U_reshaped[layer_idx]
-            W_l = W_reshaped[layer_idx]
-            h = torch.einsum('bhd,hdr->bhr', v_heads, U_l)
-            gamma = torch.einsum('bhr,hrd->bhd', h * h, W_l)
-            gamma = CudaConstants.CURVATURE_CLAMP * torch.tanh(gamma / CudaConstants.CURVATURE_CLAMP)
-            if dt_scales.numel() > 0:
-                if dt_scales.dim() > 1:
-                    dt_eff = dt * dt_scales[layer_idx % dt_scales.size(0)].view(1, num_heads, 1)
-                else:
-                    dt_eff = dt * dt_scales[layer_idx % dt_scales.size(0)].view(1, 1, 1)
-            else:
-                dt_eff = torch.tensor(dt, device=device, dtype=x.dtype).view(1, 1, 1)
-            v_heads = v_heads + dt_eff * (f_heads - gamma)
-            x_heads = x_heads + dt_eff * v_heads
+        f_t = f[:, t] # [B, D_total]
+        
+        # Split into heads for logic
+        x_h = x_curr.view(B, num_heads, head_dim)
+        v_h = v_curr.view(B, num_heads, head_dim)
+        f_h = f_t.view(B, num_heads, head_dim)
+        
+        if h_state is not None:
+            m_h = h_state.view(B, num_heads, head_dim)
+        
+        # Effective DT per head
+        dt_eff = (dt * dt_scales).view(1, num_heads, 1) # [1, H, 1]
+        h = 0.5 * dt_eff
+        
+        # 1. Evaluate Current Dynamics
+        # Friction mu
+        mu_h = torch.zeros_like(v_h)
+        if Wf is not None:
+            feat_h = x_h
             if topology == 1:
-                x_heads = torch.fmod(x_heads, 2 * torch.pi)
-                x_heads = torch.where(x_heads < 0, x_heads + 2 * torch.pi, x_heads)
-        x_curr = x_heads.reshape(B, D)
-        v_curr = v_heads.reshape(B, D)
+                feat_h = torch.cat([torch.sin(x_h), torch.cos(x_h)], dim=-1)
+            
+            gate = torch.einsum('bhd,hdk->bhk', feat_h, Wf_heads.transpose(1, 2))
+            if bf_heads is not None:
+                gate = gate + bf_heads.view(1, num_heads, head_dim)
+            if Wi_heads is not None:
+                gate = gate + torch.einsum('bhd,hdk->bhk', f_h, Wi_heads.transpose(1, 2))
+            mu_h = torch.sigmoid(gate) * CudaConstants.FRICTION_SCALE
+            
+            if kwargs.get('velocity_friction_scale', 0.0) > 0.0:
+                v_norm = torch.norm(v_h, dim=-1, keepdim=True) / (head_dim**0.5 + 1e-8)
+                mu_h = mu_h * (1.0 + kwargs['velocity_friction_scale'] * v_norm)
+        
+        # Ghost Force
+        fg_h = torch.zeros_like(f_h)
+        if hyst_enabled and h_rd_w is not None:
+            fg_h = torch.einsum('bhd,hdk->bhk', m_h, h_rd_w.view(num_heads, head_dim, head_dim).transpose(1, 2))
+            if h_rd_b is not None:
+                fg_h = fg_h + h_rd_b.view(1, num_heads, head_dim)
+        
+        # Christoffel Gamma
+        # h_proj: [B, H, R]
+        h_proj = torch.einsum('bhd,hdr->bhr', v_h, U_heads)
+        energy = torch.sum(h_proj * h_proj, dim=-1, keepdim=True) / max(1, h_proj.shape[-1])
+        s_norm = 1.0 / (1.0 + torch.sqrt(energy) + 1e-8)
+        
+        # gamma: [B, H, D_h]
+        gamma_h = torch.einsum('bhr,hrd->bhd', h_proj * h_proj, W_heads) * s_norm
+        
+        # --- NEW: Phase 2 Geometry Fusion in Autograd Fallback ---
+        # A. Thermodynamic Modulation
+        thermo_alpha = float(kwargs.get('thermo_alpha', 0.0))
+        if thermo_alpha > 0.0:
+            thermo_temp = float(kwargs.get('thermo_temp', 1.0))
+            T = max(thermo_temp, 1e-8)
+            # Energy E = (force^2).mean()
+            f_energy = (f_h ** 2).mean(dim=-1, keepdim=True) # [B, H, 1]
+            modulator = torch.exp(-thermo_alpha * f_energy / T)
+            gamma_h = gamma_h * modulator
+            
+        # B. AdS/CFT Holographic Term
+        holo_z = kwargs.get('holographic_z')
+        holo_gz = kwargs.get('holographic_grad_z')
+        if holo_z is not None and holo_gz is not None and holo_z.numel() > 0:
+            # Reshape for heads
+            z_h = holo_z.view(B, num_heads, 1)
+            gz_h = holo_gz.view(B, num_heads, head_dim)
+            
+            v_dot_gz = (v_h * gz_h).sum(dim=-1, keepdim=True)
+            v_sq = (v_h * v_h).sum(dim=-1, keepdim=True)
+            
+            gamma_ads = -(1.0 / (z_h + 1e-8)) * (2.0 * v_dot_gz * v_h - v_sq * gz_h)
+            gamma_h = gamma_h + gamma_ads
+        # --------------------------------------------------------
+
+        gamma_h = CudaConstants.CURVATURE_CLAMP * torch.tanh(gamma_h / CudaConstants.CURVATURE_CLAMP)
+        
+        # 2. Kick-Drift-Kick (Leapfrog Sequence)
+        # Stage 1: Half-kick
+        v_half = (v_h + h * (f_h + fg_h - gamma_h)) / (1.0 + h * mu_h + 1e-8)
+
+        
+        # Stage 2: Drift
+        x_new_h = x_h + dt_eff * v_half
+        if topology == 1:
+            x_new_h = torch.atan2(torch.sin(x_new_h), torch.cos(x_new_h))
+        
+        # Stage 3: Re-evaluate and Final Kick
+        # (For simplicity here, we assume mu and gamma are reasonably constant over dt for the second kick)
+        # In the CUDA kernel we re-evaluate; let's do it here too for parity.
+        
+        # Re-eval mu/gamma at x_new_h
+        if Wf is not None:
+            feat_h = x_new_h
+            if topology == 1:
+                feat_h = torch.cat([torch.sin(x_new_h), torch.cos(x_new_h)], dim=-1)
+            gate = torch.einsum('bhd,hdk->bhk', feat_h, Wf_heads.transpose(1, 2))
+            if bf_heads is not None: gate = gate + bf_heads.view(1, num_heads, head_dim)
+            if Wi_heads is not None: gate = gate + torch.einsum('bhd,hdk->bhk', f_h, Wi_heads.transpose(1, 2))
+            mu_h = torch.sigmoid(gate) * CudaConstants.FRICTION_SCALE
+        
+        h_proj = torch.einsum('bhd,hdr->bhr', v_half, U_heads)
+        energy = torch.sum(h_proj * h_proj, dim=-1, keepdim=True) / max(1, h_proj.shape[-1])
+        s_norm = 1.0 / (1.0 + torch.sqrt(energy) + 1e-8)
+        gamma_h = torch.einsum('bhr,hrd->bhd', h_proj * h_proj, W_heads) * s_norm
+        
+        # --- NEW: Phase 2 Geometry Fusion in Autograd Fallback (Stage 2) ---
+        if thermo_alpha > 0.0:
+            gamma_h = gamma_h * modulator # Use same modulator as it depends on force_t
+            
+        if holo_z is not None and holo_gz is not None and holo_z.numel() > 0:
+            gamma_ads = -(1.0 / (z_h + 1e-8)) * (2.0 * v_dot_gz * v_half - v_sq * gz_h)
+            gamma_h = gamma_h + gamma_ads
+        # -----------------------------------------------------------------
+
+        gamma_h = CudaConstants.CURVATURE_CLAMP * torch.tanh(gamma_h / CudaConstants.CURVATURE_CLAMP)
+        
+        v_new_h = (v_half + h * (f_h + fg_h - gamma_h)) / (1.0 + h * mu_h + 1e-8)
+
+        
+        # 3. Update State
+        x_curr = x_new_h.reshape(B, D_total)
+        v_curr = v_new_h.reshape(B, D_total)
+        
+        # Hysteresis State Update
+        if hyst_enabled:
+            h_in = x_new_h
+            if topology == 1:
+                h_in = torch.cat([torch.sin(x_new_h), torch.cos(x_new_h)], dim=-1)
+            h_in = torch.cat([h_in, v_new_h], dim=-1)
+            
+            h_gate = torch.einsum('bhd,hdk->bhk', h_in, h_up_w.view(num_heads, head_dim, -1).transpose(1, 2))
+            if h_up_b is not None:
+                h_gate = h_gate + h_up_b.view(1, num_heads, head_dim)
+            
+            h_state = h_state * h_decay + torch.tanh(h_gate.reshape(B, D_total))
+            
         x_seq.append(x_curr)
+        
     x_seq = torch.stack(x_seq, dim=1)
-    return x_curr, v_curr, x_seq, torch.zeros((), device=device), None
+    return x_curr, v_curr, x_seq, torch.zeros((), device=device), h_state
+
 
 
 def get_timing_stats() -> Dict[str, Dict[str, float]]:
@@ -692,6 +887,224 @@ def reset_timing():
     timing_registry.reset()
 
 
+
+
+class HeunAutogradFunction(torch.autograd.Function):
+    """
+    Autograd function for fused Heun (RK2) integrator.
+    """
+    
+    @staticmethod
+    def forward(ctx, x, v, force, U, W, dt, dt_scale, steps, topology,
+                W_forget, b_forget,
+                plasticity, sing_thresh, sing_strength, R, r,
+                W_input, velocity_friction_scale,
+                hysteresis_state, hyst_update_w, hyst_update_b, 
+                hyst_readout_w, hyst_readout_b, hyst_decay, hyst_enabled):
+        
+        is_cuda = x.is_cuda
+        
+        # Ensure contiguity
+        x = x.contiguous()
+        v = v.contiguous()
+        if force is None: force = torch.zeros_like(x)
+        force = force.contiguous()
+        U = U.contiguous()
+        W = W.contiguous()
+        
+        wf = W_forget if W_forget is not None and torch.is_tensor(W_forget) and W_forget.numel() > 0 else torch.empty(0, device=x.device, dtype=x.dtype)
+        bf = b_forget if b_forget is not None and torch.is_tensor(b_forget) and b_forget.numel() > 0 else torch.empty(0, device=x.device, dtype=x.dtype)
+        wi = W_input if W_input is not None and torch.is_tensor(W_input) and W_input.numel() > 0 else torch.empty(0, device=x.device, dtype=x.dtype)
+        
+        # Try using CUDA
+        if is_cuda:
+            try:
+                import gfn_cuda
+                
+                h_s = hysteresis_state if hysteresis_state is not None and torch.is_tensor(hysteresis_state) else torch.empty(0, device=x.device, dtype=x.dtype)
+                h_up_w = hyst_update_w if hyst_update_w is not None and torch.is_tensor(hyst_update_w) else torch.empty(0, device=x.device, dtype=x.dtype)
+                h_up_b = hyst_update_b if hyst_update_b is not None and torch.is_tensor(hyst_update_b) else torch.empty(0, device=x.device, dtype=x.dtype)
+                h_rd_w = hyst_readout_w if hyst_readout_w is not None and torch.is_tensor(hyst_readout_w) else torch.empty(0, device=x.device, dtype=x.dtype)
+                h_rd_b = hyst_readout_b if hyst_readout_b is not None and torch.is_tensor(hyst_readout_b) else torch.empty(0, device=x.device, dtype=x.dtype)
+
+                x_out, v_out = gfn_cuda.heun_fused(
+                    x, v, force, U, W,
+                    float(dt), float(dt_scale), int(steps), int(topology),
+                    wf, bf, wi,
+                    float(plasticity), float(sing_thresh), float(sing_strength),
+                    float(R), float(r), float(velocity_friction_scale),
+                    h_s, h_up_w, h_up_b, h_rd_w, h_rd_b, float(hyst_decay), hyst_enabled
+                )
+                
+                ctx.save_for_backward(x, v, force, U, W)
+                ctx.dt = dt
+                ctx.dt_scale = dt_scale
+                ctx.steps = steps
+                ctx.topology = topology
+                ctx.R = R
+                ctx.r = r
+                ctx.is_cuda = True
+                
+                return x_out, v_out
+                
+            except (ImportError, AttributeError):
+                pass
+        
+        # Fallback to Python
+        from .ops import heun_fused as heun_py
+        x_out, v_out = heun_py(x, v, force, U, W, dt, dt_scale, steps, topology,
+                               W_forget, b_forget, plasticity, sing_thresh, 
+                               sing_strength, R, r, W_input, velocity_friction_scale)
+        
+        ctx.save_for_backward(x, v, force, U, W)
+        ctx.dt = dt
+        ctx.dt_scale = dt_scale
+        ctx.steps = steps
+        ctx.topology = topology
+        ctx.R = R
+        ctx.r = r
+        ctx.is_cuda = False
+        
+        return x_out, v_out
+
+    @staticmethod
+    def backward(ctx, grad_x_out, grad_v_out):
+        """
+        Heun integrator backward pass.
+        Returns gradients for all 25 forward arguments.
+        """
+        x, v, force, U, W = ctx.saved_tensors
+        
+        # 1:x, 2:v, 3:f, 4:U, 5:W, 6:dt, 7:dt_s, 8:steps, 9:topo, 
+        # 10:Wf, 11:bf, 12:plas, 13:th, 14:st, 15:R, 16:r, 17:Wi, 18:vf
+        # 19:h_s, 20:h_up_w, 21:h_up_b, 22:h_rd_w, 23:h_rd_b, 24:h_dec, 25:h_en
+        
+        if getattr(ctx, 'is_cuda', False):
+            try:
+                import gfn_cuda
+                grads = gfn_cuda.heun_backward_fused(
+                    grad_x_out.contiguous(), grad_v_out.contiguous(),
+                    x, v, force, U, W,
+                    float(ctx.dt), float(ctx.dt_scale), int(ctx.steps), int(ctx.topology),
+                    float(ctx.R), float(ctx.r)
+                )
+                
+                # Heun CUDA backward currently returns 5 grads: dx, dv, df, dU, dW
+                return (grads[0], grads[1], grads[2], grads[3], grads[4], 
+                        None, None, None, None, # 6-9
+                        None, None,             # 10-11 (Wf, bf - not supported in Heun kernel yet)
+                        None, None, None, None, None, # 12-16 (scalars)
+                        None, None,             # 17-18 (Wi, vf)
+                        None, None, None, None, None, None, None) # 19-25 (Hysteresis)
+                        
+            except (ImportError, AttributeError):
+                pass
+                
+        # PyTorch Fallback
+        def heun_fn(x_in, v_in, f_in, U_in, W_in):
+            from .ops import heun_fused as heun_py
+            return heun_py(x_in, v_in, f_in, U_in, W_in, 
+                           ctx.dt, ctx.dt_scale, ctx.steps, ctx.topology,
+                           None, None, # Wf, bf
+                           0.0, 0.5, 2.0, # plasticity, sing_thresh, sing_strength
+                           ctx.R, ctx.r,
+                           None, 0.0) # W_input, vf
+        
+        grads = torch.autograd.grad(
+            heun_fn(x, v, force, U, W),
+            [x, v, force, U, W],
+            (grad_x_out, grad_v_out),
+            allow_unused=True,
+            retain_graph=False
+        )
+        
+        return (grads[0] if grads[0] is not None else torch.zeros_like(x),
+                grads[1] if grads[1] is not None else torch.zeros_like(v),
+                grads[2] if grads[2] is not None else torch.zeros_like(force),
+                grads[3] if grads[3] is not None else torch.zeros_like(U),
+                grads[4] if grads[4] is not None else torch.zeros_like(W),
+                None, None, None, None, # 6-9
+                None, None,             # 10-11
+                None, None, None, None, None, # 12-16
+                None, None,             # 17-18
+                None, None, None, None, None, None, None) # 19-25
+
+
+class LowRankChristoffelWithFrictionFunction(torch.autograd.Function):
+    """
+    Legacy autograd function for Christoffel with Friction.
+    """
+    @staticmethod
+    def forward(ctx, v, U, W, x, V_w, force, W_forget, b_forget, W_input,
+                plasticity, sing_thresh, sing_strength, topology, R, r,
+                velocity_friction_scale=0.0):
+        
+        ctx.save_for_backward(v, U, W, x, V_w, force, W_forget, b_forget, W_input)
+        ctx.plasticity = plasticity
+        ctx.sing_thresh = sing_thresh
+        ctx.sing_strength = sing_strength
+        ctx.topology = topology
+        ctx.R = R
+        ctx.r = r
+        ctx.velocity_friction_scale = velocity_friction_scale
+        
+        from .ops import christoffel_fused
+        gamma = christoffel_fused(v, U, W, x, V_w, plasticity, sing_thresh, sing_strength, topology, R, r)
+        
+        mu = torch.zeros_like(v)
+        if W_forget is not None and torch.is_tensor(W_forget) and b_forget is not None and torch.is_tensor(b_forget):
+            features = torch.cat([torch.sin(x), torch.cos(x)], dim=-1) if topology == 1 else x
+            mu = torch.sigmoid(torch.matmul(features, W_forget.t()) + b_forget) * CudaConstants.FRICTION_SCALE
+            if velocity_friction_scale > 0:
+                mu = mu * (1.0 + velocity_friction_scale * (torch.norm(v, dim=-1, keepdim=True) / (v.shape[-1]**0.5 + 1e-8)))
+        
+        return gamma + mu * v
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        v, U, W, x, V_w, force, W_f, b_f, W_i = ctx.saved_tensors
+        
+        if v.is_cuda:
+            try:
+                import gfn_cuda
+                grads = gfn_cuda.lowrank_christoffel_friction_backward(
+                    grad_output.contiguous(), torch.empty(0), v, U, W, x, V_w, force,
+                    W_f if W_f is not None and torch.is_tensor(W_f) else torch.empty(0),
+                    b_f if b_f is not None and torch.is_tensor(b_f) else torch.empty(0),
+                    W_i if W_i is not None and torch.is_tensor(W_i) else torch.empty(0),
+                    float(ctx.plasticity), float(ctx.sing_thresh), float(ctx.sing_strength),
+                    int(ctx.topology), float(ctx.R), float(ctx.r), float(ctx.velocity_friction_scale)
+                )
+                return (grads[0], grads[1], grads[2], grads[3], grads[4], grads[5], grads[6], grads[7], grads[8],
+                        None, None, None, None, None, None, None)
+            except (ImportError, AttributeError):
+                pass
+        return (None,) * 16
+
+
+def heun_fused_autograd(x, v, force, U, W, dt, dt_scale, steps, topology=0,
+                       W_forget=None, b_forget=None, 
+                       plasticity=0.0, sing_thresh=0.5, sing_strength=2.0,
+                       R=2.0, r=1.0, 
+                       W_input=None, velocity_friction_scale=0.0,
+                       **kwargs):
+    h_s = kwargs.get('hysteresis_state')
+    h_up_w = kwargs.get('hyst_update_w')
+    h_up_b = kwargs.get('hyst_update_b')
+    h_rd_w = kwargs.get('hyst_readout_w')
+    h_rd_b = kwargs.get('hyst_readout_b')
+    h_decay = kwargs.get('hyst_decay', 0.9)
+    h_enabled = kwargs.get('hyst_enabled', False)
+    
+    return HeunAutogradFunction.apply(
+        x, v, force, U, W, dt, dt_scale, steps, topology,
+        W_forget, b_forget,
+        plasticity, sing_thresh, sing_strength, R, r,
+        W_input, velocity_friction_scale,
+        h_s, h_up_w, h_up_b, h_rd_w, h_rd_b, h_decay, h_enabled
+    )
+
+
 def toroidal_leapfrog_fused_autograd(
     x: torch.Tensor, 
     v: torch.Tensor, 
@@ -702,7 +1115,9 @@ def toroidal_leapfrog_fused_autograd(
     batch: int,
     seq_len: int,
     dim: int,
-    hysteresis_state: Optional[torch.Tensor] = None
+    hysteresis_state: Optional[torch.Tensor] = None,
+    W_forget: Optional[torch.Tensor] = None,
+    b_forget: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Toroidal leapfrog integration with autograd support.
@@ -738,9 +1153,15 @@ def toroidal_leapfrog_fused_autograd(
     for t in range(seq_len):
         force_t = f[:, t]  # [batch, dim]
         
-        # Leapfrog integration for toroidal manifold
-        # Half-step velocity update
-        v_half = v_curr + 0.5 * dt * force_t
+        # Friction gate (first half-step)
+        if W_forget is not None and b_forget is not None and W_forget.shape[0] == dim and W_forget.shape[1] == 2 * dim and b_forget.shape[0] == dim:
+            feats = torch.cat([torch.sin(x_curr), torch.cos(x_curr)], dim=-1)
+            gate = feats @ W_forget.t() + b_forget
+            mu1 = torch.sigmoid(gate) * CudaConstants.FRICTION_SCALE
+        else:
+            mu1 = torch.zeros_like(x_curr)
+        
+        v_half = (v_curr + 0.5 * dt * force_t) / (1.0 + 0.5 * dt * mu1 + CudaConstants.EPSILON_STANDARD)
         
         # Position update with toroidal Christoffel correction
         x_new = x_curr + dt * v_half
@@ -772,11 +1193,17 @@ def toroidal_leapfrog_fused_autograd(
                 gamma[:, i] = gamma_theta
                 gamma[:, i + 1] = gamma_phi
         
-        # Clamp Christoffel forces
         gamma = torch.clamp(gamma, -10.0, 10.0)
         
-        # Final velocity update with Christoffel correction
-        v_new = v_half + 0.5 * dt * (force_t - gamma)
+        # Friction gate (second half-step)
+        if W_forget is not None and b_forget is not None and W_forget.shape[0] == dim and W_forget.shape[1] == 2 * dim and b_forget.shape[0] == dim:
+            feats2 = torch.cat([torch.sin(x_new), torch.cos(x_new)], dim=-1)
+            gate2 = feats2 @ W_forget.t() + b_forget
+            mu2 = torch.sigmoid(gate2) * CudaConstants.FRICTION_SCALE
+        else:
+            mu2 = torch.zeros_like(x_curr)
+        
+        v_new = (v_half + 0.5 * dt * (force_t - gamma)) / (1.0 + 0.5 * dt * mu2 + CudaConstants.EPSILON_STANDARD)
         
         # Update state
         x_curr = x_new

@@ -19,8 +19,9 @@ cuda_sources = [
     # Integrator kernels - Runge-Kutta
     'src/integrators/runge_kutta/heun_fused.cu',
     'src/integrators/runge_kutta/heun_backward.cu',
-    'src/integrators/recurrent_manifold_fused.cpp',
+    'src/integrators/unified_mlayer.cu',
 ]
+
 
 # Convert to absolute paths
 cuda_sources = [os.path.join(os.path.dirname(__file__), src) for src in cuda_sources]

@@ -7,33 +7,7 @@
 namespace gfn {
 namespace cuda {
 
-// ============================================================================
-// Block Reduction Helper
-// ============================================================================
-
-template <typename scalar_t>
-__device__ inline scalar_t warp_reduce_sum(scalar_t val) {
-    for (int offset = warpSize/2; offset > 0; offset /= 2)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
-}
-
-template <typename scalar_t>
-__device__ inline scalar_t block_reduce_sum(scalar_t val) {
-    static __shared__ scalar_t shared[32]; // Max 32 warps
-    int lane = threadIdx.x % warpSize;
-    int wid = threadIdx.x / warpSize;
-
-    val = warp_reduce_sum(val);
-
-    if (lane == 0) shared[wid] = val;
-    __syncthreads();
-
-    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : 0;
-    if (wid == 0) val = warp_reduce_sum(val);
-    
-    return val;
-}
+ 
 
 // ============================================================================
 // Distributed Helper Functions
@@ -56,13 +30,14 @@ __device__ void christoffel_distributed(
     scalar_t r,
     scalar_t* gamma_val, // Output gamma[tid]
     scalar_t* h_shared,  // Shared memory for h [rank]
-    scalar_t* v_shared   // Shared memory for v [dim] (for torus cross-warp access)
+    scalar_t* v_shared,   // Shared memory for v [dim] (for torus cross-warp access)
+    const scalar_t* V_w = nullptr // [dim] (Optional singularity vector)
 ) {
     int tid = threadIdx.x;
     if (tid >= dim) return;
 
     // 1. Torus special case
-    if (topology == Topology::TORUS && x_shared != nullptr) {
+    if (topology == Topology::TORUS && x_shared != nullptr && V_w == nullptr) {
         *gamma_val = 0.0f;
         // FIX BUG-6: Use shared memory for neighbor access instead of warp shuffles.
         // __shfl_down_sync / __shfl_up_sync only work within a 32-thread warp.
@@ -78,11 +53,14 @@ __device__ void christoffel_distributed(
             sincos_scalar(th, &s, &c);
             
             scalar_t denom = R + r * c;
-            denom = (denom < CLAMP_MIN_STRONG) ? CLAMP_MIN_STRONG : denom;
-            scalar_t term_th = denom * s / (r + EPSILON_SMOOTH);
+            denom = (denom < static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>)) ? static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>) : denom;
+            scalar_t term_th = denom * s / (r + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
             scalar_t g0 = term_th * (v_ph * v_ph);
             
-            *gamma_val = soft_clamp(g0 * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+            *gamma_val = soft_clamp<scalar_t>(
+                g0 * static_cast<scalar_t>(TOROIDAL_CURVATURE_SCALE<scalar_t>),
+                static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>)
+            );
         } else if (tid % 2 != 0) {
             scalar_t th = x_shared[tid - 1];
             scalar_t v_ph = v_val;
@@ -91,11 +69,14 @@ __device__ void christoffel_distributed(
             sincos_scalar(th, &s, &c);
             
             scalar_t denom = R + r * c;
-            denom = (denom < CLAMP_MIN_STRONG) ? CLAMP_MIN_STRONG : denom;
-            scalar_t term_ph = -(r * s) / (denom + EPSILON_SMOOTH);
+            denom = (denom < static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>)) ? static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>) : denom;
+            scalar_t term_ph = -(r * s) / (denom + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
             scalar_t g1 = 2.0f * term_ph * v_ph * v_th;
             
-            *gamma_val = soft_clamp(g1 * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+            *gamma_val = soft_clamp<scalar_t>(
+                g1 * static_cast<scalar_t>(TOROIDAL_CURVATURE_SCALE<scalar_t>),
+                static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>)
+            );
         }
         __syncthreads(); // Ensure all threads finish before v_shared is reused
         return;
@@ -118,6 +99,27 @@ __device__ void christoffel_distributed(
     }
     
     // Now h_shared is populated.
+    
+    // 3. Plasticity Logic (All threads)
+    scalar_t v_sum = 0.0f;
+    if (plasticity != 0.0f) {
+        v_sum = block_reduce_sum(v_val * v_val);
+    }
+
+    // 4. Singularity Logic (All threads)
+    scalar_t pot_sum = 0.0f;
+    if (x_shared != nullptr && V_w != nullptr) {
+        scalar_t pot_val = 0.0f;
+        if (topology == Topology::TORUS) {
+             scalar_t s, c;
+             sincos_scalar(x_shared[tid], &s, &c);
+             pot_val = s * V_w[tid];
+        } else {
+             pot_val = x_shared[tid] * V_w[tid];
+        }
+        pot_sum = block_reduce_sum(pot_val);
+    }
+
     // Calculate Energy and Scalars (Thread 0 does it, or all?)
     __shared__ scalar_t S_shared;
     __shared__ scalar_t M_shared;
@@ -128,9 +130,23 @@ __device__ void christoffel_distributed(
         if (rank > 0) energy /= static_cast<scalar_t>(rank);
         
         scalar_t norm = sqrt(energy);
-        S_shared = 1.0f / (1.0f + norm + EPSILON_STANDARD);
+        S_shared = static_cast<scalar_t>(1) / (static_cast<scalar_t>(1) + norm + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
         
         scalar_t M = 1.0f;
+        
+        // Apply Plasticity
+        if (plasticity != 0.0f) {
+             scalar_t v_energy = v_sum / static_cast<scalar_t>(dim);
+             M *= (1.0f + plasticity * 0.1f * tanh(v_energy));
+        }
+
+        // Apply Singularity
+        if (x_shared != nullptr && V_w != nullptr) {
+             scalar_t gate = sigmoid(pot_sum);
+             scalar_t soft_m = sigmoid(static_cast<scalar_t>(SINGULARITY_GATE_SLOPE<scalar_t>) * (gate - sing_thresh));
+             M *= (1.0f + (sing_strength - 1.0f) * soft_m);
+        }
+
         M_shared = M;
     }
     __syncthreads();
@@ -144,7 +160,7 @@ __device__ void christoffel_distributed(
         sum_gamma += W[tid * rank + k] * h_sq;
     }
     
-    *gamma_val = soft_clamp(sum_gamma, CURVATURE_CLAMP);
+    *gamma_val = soft_clamp<scalar_t>(sum_gamma, static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>));
 }
 
 
@@ -200,11 +216,11 @@ __device__ void friction_distributed(
         }
     }
     
-    scalar_t base_friction = sigmoid(sum) * FRICTION_SCALE;
+    scalar_t base_friction = sigmoid(sum) * static_cast<scalar_t>(FRICTION_SCALE<scalar_t>);
     
     // 4. Velocity Scaling (FIX: Added support)
     if (velocity_friction_scale > 0.0f) {
-        scalar_t v_scale = v_norm / (sqrt(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
+        scalar_t v_scale = v_norm / (sqrt(static_cast<scalar_t>(dim)) + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
         *friction_val = base_friction * (1.0f + velocity_friction_scale * v_scale);
     } else {
         *friction_val = base_friction;
@@ -227,6 +243,7 @@ __global__ void leapfrog_fused_kernel(
     const scalar_t* __restrict__ W_forget,   // [dim, feature_dim]
     const scalar_t* __restrict__ b_forget,   // [dim]
     const scalar_t* __restrict__ W_input,    // [dim, dim] (Added)
+    const scalar_t* __restrict__ V_w,        // [dim] (Singularity vector)
     scalar_t* __restrict__ x_out,            // [batch, dim]
     scalar_t* __restrict__ v_out,            // [batch, dim]
     int batch_size,
@@ -326,14 +343,15 @@ __global__ void leapfrog_fused_kernel(
         christoffel_distributed(
             curr_v, U, W, x_shared, dim, rank, plasticity, 
             sing_thresh, sing_strength, topology, R, r, 
-            &gamma, h_shared, features_shared
+            &gamma, h_shared, v_shared, V_w
         );
         
         // 3. Kick 1
+        // AUDIT FIX: Use exactly one EPSILON_STANDARD in denominator (was redundant with safe_divide)
         scalar_t total_force = f_ext + f_ghost;
         scalar_t num = curr_v + step_h * (total_force - gamma);
-        scalar_t den = 1.0f + step_h * friction;
-        curr_v = safe_divide(num, den, EPSILON_STANDARD);
+        scalar_t den = 1.0f + step_h * friction; 
+        curr_v = safe_divide<scalar_t>(num, den, static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
         
         // 4. Drift
         curr_x += effective_dt * curr_v;
@@ -361,7 +379,7 @@ __global__ void leapfrog_fused_kernel(
         christoffel_distributed(
             curr_v, U, W, x_shared, dim, rank, plasticity,
             sing_thresh, sing_strength, topology, R, r,
-            &gamma, h_shared, features_shared
+            &gamma, h_shared, v_shared, V_w
         );
         
         // 7. Kick 2
@@ -380,8 +398,9 @@ __global__ void leapfrog_fused_kernel(
             __syncthreads();
         }
         num = curr_v + step_h * (total_force2 - gamma);
+        // AUDIT FIX: Use exactly one EPSILON_STANDARD in denominator
         den = 1.0f + step_h * friction;
-        curr_v = safe_divide(num, den, EPSILON_STANDARD);
+        curr_v = safe_divide<scalar_t>(num, den, static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
         
         // 8. Update Hysteresis
         if (hyst_enabled && hyst_update_w != nullptr) {
@@ -436,6 +455,7 @@ std::vector<torch::Tensor> leapfrog_fused(
     float dt, float dt_scale, int steps, int topology,
     torch::Tensor W_forget, torch::Tensor b_forget,
     torch::Tensor W_input,
+    torch::Tensor V_w, // Singularity vector
     float plasticity, float sing_thresh, float sing_strength, float R, float r,
     float velocity_friction_scale,
     torch::Tensor hysteresis_state,
@@ -456,6 +476,7 @@ std::vector<torch::Tensor> leapfrog_fused(
     int batch_size = x.size(0);
     int dim = x.size(1);
     int rank = U.size(1);
+    TORCH_CHECK(dim > 0 && dim <= 1024, "leapfrog_fused requires 1 <= dim <= 1024");
     
     auto x_out = torch::empty_like(x);
     auto v_out = torch::empty_like(v);
@@ -463,12 +484,15 @@ std::vector<torch::Tensor> leapfrog_fused(
     // Optional pointers
     const void* W_forget_ptr = nullptr;
     const void* b_forget_ptr = nullptr;
-    if (W_forget.defined()) W_forget_ptr = W_forget.data_ptr();
-    if (b_forget.defined()) b_forget_ptr = b_forget.data_ptr();
+    if (W_forget.defined() && W_forget.numel() > 0) W_forget_ptr = W_forget.data_ptr();
+    if (b_forget.defined() && b_forget.numel() > 0) b_forget_ptr = b_forget.data_ptr();
     
     const void* W_input_ptr = nullptr;
-    if (W_input.defined()) W_input_ptr = W_input.data_ptr();
+    if (W_input.defined() && W_input.numel() > 0) W_input_ptr = W_input.data_ptr();
     
+    const void* V_w_ptr = nullptr;
+    if (V_w.defined() && V_w.numel() > 0) V_w_ptr = V_w.data_ptr();
+
     void* hyst_state_ptr = nullptr;
     const void* hyst_up_w_ptr = nullptr;
     const void* hyst_up_b_ptr = nullptr;
@@ -510,6 +534,7 @@ std::vector<torch::Tensor> leapfrog_fused(
             reinterpret_cast<const scalar_t*>(W_forget_ptr),
             reinterpret_cast<const scalar_t*>(b_forget_ptr),
             reinterpret_cast<const scalar_t*>(W_input_ptr),
+            reinterpret_cast<const scalar_t*>(V_w_ptr),
             x_out.data_ptr<scalar_t>(),
             v_out.data_ptr<scalar_t>(),
             batch_size,

@@ -60,30 +60,30 @@ namespace cuda {
  * @param gamma_phi Output: Christoffel force component Γ(v,v)^φ
  */
 GFN_DEVICE void toroidal_christoffel_pair(
-    scalar_t theta,
-    scalar_t phi,  // Unused but kept for API consistency
-    scalar_t v_theta,
-    scalar_t v_phi,
-    scalar_t R,
-    scalar_t r,
-    scalar_t* gamma_theta,
-    scalar_t* gamma_phi
+    float theta,
+    float phi,  // Unused but kept for API consistency
+    float v_theta,
+    float v_phi,
+    float R,
+    float r,
+    float* gamma_theta,
+    float* gamma_phi
 ) {
     // Precompute trigonometric functions
-    scalar_t sin_theta = sinf(theta);
-    scalar_t cos_theta = cosf(theta);
+    float sin_theta = sinf(theta);
+    float cos_theta = cosf(theta);
     
     // Compute metric coefficient: g_φφ = (R + r*cos(θ))²
-    scalar_t denom = fmax(R + r * cos_theta, CLAMP_MIN_STRONG);
+    float denom = fmaxf(R + r * cos_theta, CLAMP_MIN_STRONG<float>);
     
     // Γ^θ_φφ = (R + r*cos(θ)) * sin(θ) / r
     // Christoffel force: -Γ^θ_φφ * v^φ * v^φ
-    scalar_t term_theta = denom * sin_theta / (r + EPSILON_SMOOTH);
+    float term_theta = denom * sin_theta / (r + EPSILON_SMOOTH<float>);
     *gamma_theta = term_theta * (v_phi * v_phi);
     
     // Γ^φ_θφ = -r*sin(θ) / (R + r*cos(θ))
     // Christoffel force: -2 * Γ^φ_θφ * v^θ * v^φ
-    scalar_t term_phi = -(r * sin_theta) / (denom + EPSILON_SMOOTH);
+    float term_phi = -(r * sin_theta) / (denom + EPSILON_SMOOTH<float>);
     *gamma_phi = 2.0f * term_phi * v_theta * v_phi;
 }
 
@@ -101,12 +101,12 @@ GFN_DEVICE void toroidal_christoffel_pair(
  * @param gamma Output: Christoffel force [dim]
  */
 GFN_DEVICE void toroidal_christoffel_full(
-    const scalar_t* x,
-    const scalar_t* v,
+    const float* x,
+    const float* v,
     int dim,
-    scalar_t R,
-    scalar_t r,
-    scalar_t* gamma
+    float R,
+    float r,
+    float* gamma
 ) {
     // Initialize output
     for (int i = 0; i < dim; ++i) {
@@ -115,12 +115,12 @@ GFN_DEVICE void toroidal_christoffel_full(
     
     // Process pairs (θ, φ)
     for (int i = 0; i < dim - 1; i += 2) {
-        scalar_t theta = x[i];
-        scalar_t phi = x[i + 1];
-        scalar_t v_theta = v[i];
-        scalar_t v_phi = v[i + 1];
+        float theta = x[i];
+        float phi = x[i + 1];
+        float v_theta = v[i];
+        float v_phi = v[i + 1];
         
-        scalar_t g_theta, g_phi;
+        float g_theta, g_phi;
         toroidal_christoffel_pair(
             theta, phi, v_theta, v_phi,
             R, r,
@@ -131,9 +131,9 @@ GFN_DEVICE void toroidal_christoffel_full(
         gamma[i + 1] = g_phi;
     }
     
-    // Apply curvature scaling and clamping
+    // Apply curvature scaling and clamping (PARITY FIX: use CURVATURE_CLAMP)
     for (int i = 0; i < dim; ++i) {
-        gamma[i] = soft_clamp(gamma[i] * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+        gamma[i] = fminf(CURVATURE_CLAMP<float>, fmaxf(-CURVATURE_CLAMP<float>, gamma[i]));
     }
 }
 
@@ -169,88 +169,98 @@ GFN_DEVICE void toroidal_christoffel_full(
  * @param v_out Output velocities [batch, seq_len, dim]
  */
 GFN_GLOBAL void toroidal_leapfrog_fused_kernel(
-    const scalar_t* x,
-    const scalar_t* v,
-    const scalar_t* f,
-    const scalar_t* W_forget,   // [dim, feat_dim] or nullptr for DEFAULT_FRICTION
-    const scalar_t* b_forget,   // [dim] or nullptr
-    scalar_t R,
-    scalar_t r,
-    scalar_t dt,
+    const float* x,
+    const float* v,
+    const float* f,
+    const float* W_forget,   // [dim, feat_dim] or nullptr for DEFAULT_FRICTION
+    const float* b_forget,   // [dim] or nullptr
+    float R,
+    float r,
+    float dt,
     int batch,
     int seq_len,
     int dim,
-    scalar_t* x_out,
-    scalar_t* v_out
+    float* x_out,
+    float* v_out
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch) return;
     
     // Thread-local state
-    scalar_t curr_x[256];  // Max dim = 256
-    scalar_t curr_v[256];
-    scalar_t gamma[256];
-    scalar_t friction[256];
+    float curr_x[256];  // Max dim = 256
+    float curr_v[256];
+    float v_half[256];
+    float gamma[256];
+    float mu1[256];
+    float mu2[256];
     
     // Initialize state
     for (int i = 0; i < dim; ++i) {
         curr_x[i] = x[tid * dim + i];
         curr_v[i] = v[tid * dim + i];
-        friction[i] = DEFAULT_FRICTION;  // Default fallback
     }
     
     // Integrate sequence
     for (int t = 0; t < seq_len; ++t) {
-        const scalar_t* f_ptr = &f[tid * seq_len * dim + t * dim];
-        scalar_t h = dt * 0.5f;  // Half time step
-        scalar_t effective_dt = dt;
+        const float* f_ptr = &f[tid * seq_len * dim + t * dim];
+        float h = dt * 0.5f;  // Half time step
+        float effective_dt = dt;
         
-        // BUG-8 FIX: Compute learned friction if weights are provided
+        // 0. PARITY FIX: Compute Christoffel at current state for Kick 1
+        toroidal_christoffel_full(curr_x, curr_v, dim, R, r, gamma);
+        
+        // 1. KICK 1 (Half step velocity with friction and Christoffel)
         if (W_forget != nullptr && b_forget != nullptr) {
-            int feat_dim = 2 * dim; // Toroidal: [sin(x), cos(x)]
-            scalar_t features[256]; // Max dim=128 after doubling
             for (int i = 0; i < dim; ++i) {
-                features[i] = sinf(curr_x[i]);
-                features[dim + i] = cosf(curr_x[i]);
-            }
-            for (int i = 0; i < dim; ++i) {
-                scalar_t gate = b_forget[i];
-                for (int j = 0; j < feat_dim; ++j) {
-                    gate += W_forget[i * feat_dim + j] * features[j];
+                float z = b_forget[i];
+                for (int j = 0; j < dim; ++j) {
+                    z += W_forget[i * (2 * dim) + j] * sinf(curr_x[j]);
+                    z += W_forget[i * (2 * dim) + (dim + j)] * cosf(curr_x[j]);
                 }
-                friction[i] = 1.0f / (1.0f + expf(-gate)) * FRICTION_SCALE;
+                float s = 1.0f / (1.0f + expf(-z));
+                mu1[i] = s * FRICTION_SCALE<float>;
             }
+        } else {
+            for (int i = 0; i < dim; ++i) mu1[i] = 0.0f;
         }
-        
-        // 1. Compute toroidal Christoffel force at current state
-        toroidal_christoffel_full(curr_x, curr_v, dim, R, r, gamma);
-        
-        // 2. KICK 1 (Half step velocity with implicit friction)
         for (int i = 0; i < dim; ++i) {
-            scalar_t numerator = curr_v[i] + h * (f_ptr[i] - gamma[i]);
-            scalar_t denominator = 1.0f + h * friction[i];
-            curr_v[i] = safe_divide(numerator, denominator, EPSILON_STANDARD);
+            float num = curr_v[i] + h * (f_ptr[i] - gamma[i]);
+            v_half[i] = num / (1.0f + h * mu1[i] + EPSILON_STANDARD<float>);
         }
         
-        // 3. DRIFT (Full step position)
+        // 2. DRIFT (Full step position)
         for (int i = 0; i < dim; ++i) {
-            curr_x[i] += effective_dt * curr_v[i];
+            curr_x[i] += effective_dt * v_half[i];
         }
         
-        // 4. Apply toroidal boundary conditions: wrap to [0, 2π)
-        apply_boundary_vector(curr_x, dim, Topology::TORUS);
-        
-        // 5. Compute toroidal Christoffel force at new state
-        toroidal_christoffel_full(curr_x, curr_v, dim, R, r, gamma);
-        
-        // 6. KICK 2 (Half step velocity with implicit friction)
+        // 3. Apply toroidal boundary conditions
         for (int i = 0; i < dim; ++i) {
-            scalar_t numerator = curr_v[i] + h * (f_ptr[i] - gamma[i]);
-            scalar_t denominator = 1.0f + h * friction[i];
-            curr_v[i] = safe_divide(numerator, denominator, EPSILON_STANDARD);
+            curr_x[i] = atan2f(sinf(curr_x[i]), cosf(curr_x[i]));
         }
         
-        // 7. Store outputs
+        // 4. Compute toroidal Christoffel force at new state
+        toroidal_christoffel_full(curr_x, v_half, dim, R, r, gamma);
+        
+        // 5. KICK 2 (Half step velocity with friction)
+        if (W_forget != nullptr && b_forget != nullptr) {
+            for (int i = 0; i < dim; ++i) {
+                float z = b_forget[i];
+                for (int j = 0; j < dim; ++j) {
+                    z += W_forget[i * (2 * dim) + j] * sinf(curr_x[j]);
+                    z += W_forget[i * (2 * dim) + (dim + j)] * cosf(curr_x[j]);
+                }
+                float s = 1.0f / (1.0f + expf(-z));
+                mu2[i] = s * FRICTION_SCALE<float>;
+            }
+        } else {
+            for (int i = 0; i < dim; ++i) mu2[i] = 0.0f;
+        }
+        for (int i = 0; i < dim; ++i) {
+            float num = v_half[i] + h * (f_ptr[i] - gamma[i]);
+            curr_v[i] = num / (1.0f + h * mu2[i] + EPSILON_STANDARD<float>);
+        }
+        
+        // 6. Store outputs
         for (int i = 0; i < dim; ++i) {
             x_out[tid * seq_len * dim + t * dim + i] = curr_x[i];
             v_out[tid * seq_len * dim + t * dim + i] = curr_v[i];
@@ -281,19 +291,19 @@ GFN_GLOBAL void toroidal_leapfrog_fused_kernel(
  * @param stream CUDA stream (optional)
  */
 void launch_toroidal_leapfrog_fused(
-    const scalar_t* x,
-    const scalar_t* v,
-    const scalar_t* f,
-    const scalar_t* W_forget,
-    const scalar_t* b_forget,
-    scalar_t R,
-    scalar_t r,
-    scalar_t dt,
+    const float* x,
+    const float* v,
+    const float* f,
+    const float* W_forget,
+    const float* b_forget,
+    float R,
+    float r,
+    float dt,
     int batch,
     int seq_len,
     int dim,
-    scalar_t* x_out,
-    scalar_t* v_out,
+    float* x_out,
+    float* v_out,
     cudaStream_t stream = 0
 ) {
     int block_size = 256;
@@ -341,28 +351,34 @@ std::vector<at::Tensor> toroidal_leapfrog_fused(
     TORCH_CHECK(x.size(0) == batch && x.size(1) == dim, "x shape mismatch");
     TORCH_CHECK(v.size(0) == batch && v.size(1) == dim, "v shape mismatch");
     TORCH_CHECK(f.size(0) == batch && f.size(1) == seq_len && f.size(2) == dim, "f shape mismatch");
+    TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
+    TORCH_CHECK(v.scalar_type() == at::kFloat, "v must be float32");
+    TORCH_CHECK(f.scalar_type() == at::kFloat, "f must be float32");
+    if (W_forget.defined() && W_forget.numel() > 0) TORCH_CHECK(W_forget.scalar_type() == at::kFloat, "W_forget must be float32");
+    if (b_forget.defined() && b_forget.numel() > 0) TORCH_CHECK(b_forget.scalar_type() == at::kFloat, "b_forget must be float32");
+    TORCH_CHECK(dim <= 256, "toroidal_leapfrog_fused requires dim <= 256");
 
     auto options = x.options();
     auto x_out = at::empty({batch, seq_len, dim}, options);
     auto v_out = at::empty({batch, seq_len, dim}, options);
 
-    const scalar_t* W_forget_ptr = (W_forget.numel() > 0) ? W_forget.data_ptr<scalar_t>() : nullptr;
-    const scalar_t* b_forget_ptr = (b_forget.numel() > 0) ? b_forget.data_ptr<scalar_t>() : nullptr;
+    const float* W_forget_ptr = (W_forget.numel() > 0) ? W_forget.data_ptr<float>() : nullptr;
+    const float* b_forget_ptr = (b_forget.numel() > 0) ? b_forget.data_ptr<float>() : nullptr;
 
     launch_toroidal_leapfrog_fused(
-        x.data_ptr<scalar_t>(),
-        v.data_ptr<scalar_t>(),
-        f.data_ptr<scalar_t>(),
+        x.data_ptr<float>(),
+        v.data_ptr<float>(),
+        f.data_ptr<float>(),
         W_forget_ptr,
         b_forget_ptr,
-        static_cast<scalar_t>(R),
-        static_cast<scalar_t>(r),
-        static_cast<scalar_t>(dt),
+        static_cast<float>(R),
+        static_cast<float>(r),
+        static_cast<float>(dt),
         static_cast<int>(batch),
         static_cast<int>(seq_len),
         static_cast<int>(dim),
-        x_out.data_ptr<scalar_t>(),
-        v_out.data_ptr<scalar_t>()
+        x_out.data_ptr<float>(),
+        v_out.data_ptr<float>()
     );
 
     cudaError_t err = cudaGetLastError();

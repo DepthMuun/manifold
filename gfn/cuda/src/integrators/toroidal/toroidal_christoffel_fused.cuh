@@ -37,17 +37,19 @@ namespace cuda {
  * @param stream CUDA stream (optional, default=0)
  */
 void launch_toroidal_leapfrog_fused(
-    const scalar_t* x,
-    const scalar_t* v,
-    const scalar_t* f,
-    scalar_t R,
-    scalar_t r,
-    scalar_t dt,
+    const float* x,
+    const float* v,
+    const float* f,
+    const float* W_forget,
+    const float* b_forget,
+    float R,
+    float r,
+    float dt,
     int batch,
     int seq_len,
     int dim,
-    scalar_t* x_out,
-    scalar_t* v_out,
+    float* x_out,
+    float* v_out,
     cudaStream_t stream = 0
 );
 
@@ -64,12 +66,12 @@ void launch_toroidal_leapfrog_fused(
  * @param gamma Output Christoffel force [dim]
  */
 GFN_DEVICE void toroidal_christoffel_full(
-    const scalar_t* x,
-    const scalar_t* v,
+    const float* x,
+    const float* v,
     int dim,
-    scalar_t R,
-    scalar_t r,
-    scalar_t* gamma
+    float R,
+    float r,
+    float* gamma
 );
 
 } // namespace cuda

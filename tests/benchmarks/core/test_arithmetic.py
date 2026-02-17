@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from gfn import Manifold
 from gfn.optimizers import RiemannianAdam
-from tests.benchmarks.bench_utils import ResultsLogger
+from tests.benchmarks.infra.utils import ResultsLogger
 
 console = Console()
 

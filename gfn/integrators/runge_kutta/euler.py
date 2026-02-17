@@ -12,10 +12,7 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-try:
-    from gfn.geometry.boundaries import apply_boundary_python
-except ImportError:
-    def apply_boundary_python(x, tid): return x
+from gfn.geometry.boundaries import apply_boundary_python, resolve_topology_id
 
 class EulerIntegrator(nn.Module):
     def __init__(self, christoffel, dt=0.01):
@@ -31,10 +28,10 @@ class EulerIntegrator(nn.Module):
                 U = getattr(self.christoffel, 'U', None)
                 W = getattr(self.christoffel, 'W', None)
                 if U is not None and W is not None:
-                    topology = getattr(self.christoffel, 'topology_id', 0)
-                    if hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus: topology = 1
+                    topology = resolve_topology_id(self.christoffel, kwargs.get('topology'))
                     
                     R = getattr(self.christoffel, 'R', 2.0)
+
                     r = getattr(self.christoffel, 'r', 1.0)
                     
                     return euler_fused(x, v, force, U, W, self.dt, dt_scale, steps=steps, topology=topology, R=R, r=r)
@@ -60,9 +57,7 @@ class EulerIntegrator(nn.Module):
             curr_v = curr_v + dt * acc
             
             # Apply Boundary (Torus)
-            topo_id = getattr(self.christoffel, 'topology_id', 0)
-            if topo_id == 0 and hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus:
-                 topo_id = 1
+            topo_id = resolve_topology_id(self.christoffel, kwargs.get('topology'))
             curr_x = apply_boundary_python(curr_x, topo_id)
         
         if collect_christ:

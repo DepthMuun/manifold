@@ -59,7 +59,32 @@ class Manifold(nn.Module):
         else:
             self.embedding = nn.Embedding(vocab_size, dim)
         
-        # --- Hysteresis / Self-Gravity (Manifold Memory) ---
+        # --- Active Inference / Hysteresis Config Consolidation ---
+        # Ensure active_inference dictionary exists
+        if 'active_inference' not in self.physics_config:
+            self.physics_config['active_inference'] = {}
+            
+        active_cfg = self.physics_config['active_inference']
+
+        # 1. Hysteresis (Manifold Memory)
+        # Check root -> active_inference
+        hyst_cfg = self.physics_config.get('hysteresis')
+        if hyst_cfg is None:
+            hyst_cfg = active_cfg.get('hysteresis', {})
+        
+        # Normalize: Ensure available at both root (for Manifold) and nested (for consistency)
+        self.physics_config['hysteresis'] = hyst_cfg
+        active_cfg['hysteresis'] = hyst_cfg
+        self.hysteresis_enabled = hyst_cfg.get('enabled', False)
+
+        # 2. Reactive Curvature & Singularities (Geometry)
+        # Check active_inference -> root (fallback)
+        if 'reactive_curvature' not in active_cfg:
+            active_cfg['reactive_curvature'] = self.physics_config.get('reactive_curvature', {})
+            
+        if 'singularities' not in active_cfg:
+            active_cfg['singularities'] = self.physics_config.get('singularities', {})
+
         # IMPORTANT NOTES FROM AUDITORIA LOGICA (2026-02-06):
         #
         # 1. HYSTERESIS VIOLATES ENERGY CONSERVATION:
@@ -74,14 +99,6 @@ class Manifold(nn.Module):
         #
         # 3. RECOMMENDATION:
         #    For strict energy conservation, set hysteresis.enabled = False
-        #
-        # 1. Check root level
-        hyst_cfg = self.physics_config.get('hysteresis', None)
-        # 2. Check inside active_inference (where math.py puts it)
-        if hyst_cfg is None:
-            hyst_cfg = self.physics_config.get('active_inference', {}).get('hysteresis', {})
-            
-        self.hysteresis_enabled = hyst_cfg.get('enabled', False)
         
         if self.hysteresis_enabled:
             # "Mass" -> Deformation Map
@@ -131,6 +148,15 @@ class Manifold(nn.Module):
                  self.readout = ImplicitReadout(dim, coord_dim, topology=topology_id)
         else:
              self.readout = nn.Linear(dim, vocab_size)
+
+        # CUDA Fusion Configuration
+        cuda_fusion_cfg = self.physics_config.get('cuda_fusion', {})
+        self.allow_fused_training = cuda_fusion_cfg.get('allow_fused_training', True) # Default to True for speed
+        
+        # Set explicitly in physics_config for manager to see it
+        if 'cuda_fusion' not in self.physics_config:
+            self.physics_config['cuda_fusion'] = {}
+        self.physics_config['cuda_fusion']['allow_fused_training'] = self.allow_fused_training
         
         
         self._print_manifest(vocab_size, dim, depth, heads, integrator_type, use_scan)

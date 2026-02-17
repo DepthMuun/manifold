@@ -38,6 +38,8 @@ from gfn.cuda.core import (
 from gfn.cuda.ops import (
     christoffel_fused,
     leapfrog_fused,
+    head_mixing_fused,
+    dynamic_gating_fused,
     ChristoffelOperation,
     LeapfrogOperation,
     CUDA_AVAILABLE
@@ -45,6 +47,7 @@ from gfn.cuda.ops import (
 from gfn.cuda.autograd import (
     christoffel_fused_autograd,
     leapfrog_fused_autograd,
+    toroidal_leapfrog_fused_autograd,
     timing_registry,
     enable_timing,
     disable_timing,
@@ -619,6 +622,158 @@ class TestCUDAVsPythonEquivalence:
                 f"CUDA/Python Leapfrog x mismatch: max_diff={x_max_diff}"
             assert v_max_diff < cuda_config.tolerance * 10, \
                 f"CUDA/Python Leapfrog v mismatch: max_diff={v_max_diff}"
+    
+    @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+    def test_head_mixing_cuda_python_equivalence(self, cuda_config: TestConfig, random_seed):
+        """Test head mixing CUDA vs Python numerical equivalence."""
+        with random_seed(cuda_config.seed):
+            H, Dh, B = 4, 8, 16
+            D = H * Dh
+            x_heads = torch.randn(H, B, Dh, dtype=torch.float32)
+            v_heads = torch.randn(H, B, Dh, dtype=torch.float32)
+            W_x = torch.randn(D, D, dtype=torch.float32)
+            W_v = torch.randn(D, D, dtype=torch.float32)
+            
+            # Move to GPU
+            x_heads_gpu = x_heads.cuda()
+            v_heads_gpu = v_heads.cuda()
+            W_x_gpu = W_x.cuda()
+            W_v_gpu = W_v.cuda()
+            
+            # Compute with CUDA
+            x_out_cuda, v_out_cuda = head_mixing_fused(x_heads_gpu, v_heads_gpu, W_x_gpu, W_v_gpu, topology=0)
+            
+            # Compute with Python (head_mixing_fused handles both)
+            x_out_python, v_out_python = head_mixing_fused(x_heads, v_heads, W_x, W_v, topology=0)
+            
+            # Check equivalence
+            x_max_diff = compute_max_abs_diff(x_out_cuda.cpu(), x_out_python)
+            v_max_diff = compute_max_abs_diff(v_out_cuda.cpu(), v_out_python)
+            
+            assert x_max_diff < cuda_config.tolerance, f"CUDA/Python Head Mixing x mismatch: max_diff={x_max_diff}"
+            assert v_max_diff < cuda_config.tolerance, f"CUDA/Python Head Mixing v mismatch: max_diff={v_max_diff}"
+
+    @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+    def test_dynamic_gating_cuda_python_equivalence(self, cuda_config: TestConfig, random_seed):
+        """Test dynamic gating CUDA vs Python numerical equivalence."""
+        with random_seed(cuda_config.seed):
+            D = 64
+            inp_dim = 2 * D
+            x = torch.randn(32, inp_dim, dtype=torch.float32)
+            W1 = torch.randn(D // 4, inp_dim, dtype=torch.float32)
+            b1 = torch.randn(D // 4, dtype=torch.float32)
+            W2 = torch.randn(1, D // 4, dtype=torch.float32)
+            b2 = torch.randn(1, dtype=torch.float32)
+            
+            # Move to GPU
+            x_gpu = x.cuda()
+            W1_gpu = W1.cuda()
+            b1_gpu = b1.cuda()
+            W2_gpu = W2.cuda()
+            b2_gpu = b2.cuda()
+            
+            # Compute with CUDA
+            y_cuda = dynamic_gating_fused(x_gpu, W1_gpu, b1_gpu, W2_gpu, b2_gpu)
+            
+            # Compute with Python
+            y_python = dynamic_gating_fused(x, W1, b1, W2, b2)
+            
+            # Check equivalence
+            # Check equivalence
+            max_diff = compute_max_abs_diff(y_cuda.cpu(), y_python)
+            assert max_diff < cuda_config.tolerance, f"CUDA/Python Dynamic Gating mismatch: max_diff={max_diff}"
+
+
+class TestSpecialCUDACases:
+    """Tests for edge cases and specialized CUDA features."""
+
+    @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+    def test_plasticity_modulation(self, cuda_config: TestConfig, random_seed):
+        """Test energy-dependent plasticity modulation."""
+        with random_seed(cuda_config.seed):
+            batch, dim, rank = 8, 32, 8
+            plasticity = 0.5
+            v = torch.randn(batch, dim, device='cuda')
+            U = torch.randn(dim, rank, device='cuda')
+            W = torch.randn(dim, rank, device='cuda')
+            x_empty = torch.empty(0, device='cuda')
+            V_w_empty = torch.empty(0, device='cuda')
+            
+            gamma_no_plas = christoffel_fused(v, U, W, x_empty, V_w_empty, 0.0, 1.0, 1.0, 0)
+            gamma_with_plas = christoffel_fused(v, U, W, x_empty, V_w_empty, plasticity, 1.0, 1.0, 0)
+            
+            diff = (gamma_with_plas - gamma_no_plas).abs().max().item()
+            assert diff > 1e-6, "Plasticity should modulate output"
+
+    @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+    def test_singularity_detection(self, cuda_config: TestConfig, random_seed):
+        """Test position-dependent singularity detection."""
+        with random_seed(cuda_config.seed):
+            batch, dim, rank = 8, 32, 8
+            sing_strength = 10.0
+            v = torch.randn(batch, dim, device='cuda')
+            x = torch.randn(batch, dim, device='cuda')
+            U = torch.randn(dim, rank, device='cuda')
+            W = torch.randn(dim, rank, device='cuda')
+            V_w = torch.randn(dim, device='cuda')
+            
+            V_w_empty = torch.empty(0, device='cuda')
+            gamma_no_sing = christoffel_fused(v, U, W, x, V_w_empty, 0.0, 0.8, 1.0, 0)
+            gamma_with_sing = christoffel_fused(v, U, W, x, V_w, 0.0, 0.8, sing_strength, 0)
+            
+            diff = (gamma_with_sing - gamma_no_sing).abs().max().item()
+            assert diff > 1e-6, "Singularities should modulate output"
+
+    @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+    def test_toroidal_leapfrog_parity(self, cuda_config: TestConfig, random_seed):
+        """Test toroidal leapfrog parity between CUDA and PyTorch autograd."""
+        # Using float32 as in the original test
+        batch, dim, seq_len = 8, 8, 5
+        dt = 0.05
+        
+        x_init = torch.randn(batch, dim, device='cuda')
+        v_init = torch.randn(batch, dim, device='cuda') * 0.1
+        force = torch.randn(batch, seq_len, dim, device='cuda')
+        
+        # Python reference
+        x_py, v_py, x_seq_py, _, _ = toroidal_leapfrog_fused_autograd(
+            x=x_init.clone(), v=v_init.clone(), f=force.clone(),
+            R=2.0, r=1.0, dt=dt, batch=batch, seq_len=seq_len, dim=dim
+        )
+        
+        # CUDA
+        Wf_empty = torch.empty(0, device='cuda')
+        bf_empty = torch.empty(0, device='cuda')
+        
+        # Assuming gfn_cuda is accessible via ops
+        from gfn.cuda.ops import gfn_cuda
+        x_seq_cuda, v_seq_cuda = gfn_cuda.toroidal_leapfrog_fused(
+            x_init.clone(), v_init.clone(), force.clone(),
+            2.0, 1.0, dt, batch, seq_len, dim, Wf_empty, bf_empty
+        )
+        
+        x_diff = (x_seq_cuda - x_seq_py).abs().max().item()
+        v_final_cuda = v_seq_cuda[:, -1, :]
+        v_diff = (v_final_cuda - v_py).abs().max().item()
+        
+        assert x_diff < 1e-4, f"Toroidal Position mismatch: {x_diff}"
+        assert v_diff < 1e-4, f"Toroidal Velocity mismatch: {v_diff}"
+
+    def test_cuda_guards(self, cuda_config: TestConfig):
+        """Test CUDA kernel dimension guards."""
+        from gfn.cuda.ops import gfn_cuda
+        batch, dim, rank = 1, 2048, 4  # Beyond block size
+        x = torch.zeros(batch, dim, device='cuda')
+        v = torch.zeros(batch, dim, device='cuda')
+        f = torch.zeros(batch, dim, device='cuda')
+        U = torch.zeros(dim, rank, device='cuda')
+        W = torch.zeros(dim, rank, device='cuda')
+        empty = torch.empty(0, device='cuda')
+        
+        with pytest.raises(RuntimeError):
+            gfn_cuda.leapfrog_fused(x, v, f, U, W, 0.01, 1.0, 1, 0,
+                                   empty, empty, empty, empty, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0,
+                                   empty, empty, empty, empty, empty, 0.0, False)
 
 
 class TestConvergenceBehavior:

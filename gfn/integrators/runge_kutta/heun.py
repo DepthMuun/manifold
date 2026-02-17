@@ -12,10 +12,7 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-try:
-    from gfn.geometry.boundaries import apply_boundary_python
-except ImportError:
-    def apply_boundary_python(x, tid): return x
+from gfn.geometry.boundaries import apply_boundary_python, resolve_topology_id
 
 class HeunIntegrator(nn.Module):
     def __init__(self, christoffel, dt=0.01):
@@ -30,10 +27,10 @@ class HeunIntegrator(nn.Module):
                 U = getattr(self.christoffel, 'U', None)
                 W = getattr(self.christoffel, 'W', None)
                 if U is not None and W is not None:
-                    topology = getattr(self.christoffel, 'topology_id', 0)
-                    if hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus: topology = 1
+                    topology = resolve_topology_id(self.christoffel, kwargs.get('topology'))
                     
                     R = getattr(self.christoffel, 'R', 2.0)
+
                     r = getattr(self.christoffel, 'r', 1.0)
                     
                     # Friction gate parameters
@@ -77,9 +74,7 @@ class HeunIntegrator(nn.Module):
                 return acc
                 
             # Determine Topology
-            topo_id = getattr(self.christoffel, 'topology_id', 0)
-            if topo_id == 0 and hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus:
-                 topo_id = 1
+            topo_id = resolve_topology_id(self.christoffel, kwargs.get('topology'))
 
             # k1
             dx1 = curr_v

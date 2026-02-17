@@ -9,20 +9,19 @@ Tests individual classes in isolation.
 *   `test_components.py`: Verifies `Manifold`, `MLayer`, and `RiemannianGating` shapes and forward passes.
 
 ### 2. ⚛️ `physics/` (Mathematical Correctness)
-Ensures the model adheres to physical laws.
-*   `test_mechanics.py`: Checks Geodesic equations, energy conservation (Symplectic integrity), and gradient flows. **Critical for "Physics-Informed" claims.**
+Ensures the model adheres to physical laws (Conservation, Gradients).
 
-### 3. 🔌 `integration/` (Training Loops)
-Tests the full training pipeline.
-*   `test_overfit_sanity.py`: Can the model overfit a single batch? (Smoke test).
-*   `test_full_training.py`: Runs a complete training epoch on dummy data.
+### 3. 🌐 `geometry/` (Metric Properties)
+Verifies Toroidal, Ricci, AdS/CFT and low-rank curvature mathematical consistency.
 
-### 4. 📊 `benchmarks/` (Performance & Metrics)
-Quantitative analysis of model capabilities.
-*   `benchmark_performance.py`: Measures Tokens/sec throughput compared to Transformers.
-*   `benchmark_copy_task.py`: Evaluates memory capacity (Copy/Paste).
-*   `benchmark_math_task.py`: Evaluates reasoning/compositional generalization.
-*   `benchmark_ood.py`: Tests Out-of-Distribution length generalization.
+### 4. 🧠 `functional/` (Behavioral Verification)
+**"Does it work as intended?"** - Emergent features like Curiosity exploration, Hysteresis memory, and Time Dilation.
+
+### 5. 🔌 `integration/` (System Stack)
+Tests the full system (vNext stack, training loops).
+
+### 6. 📊 `benchmarks/` (Performance & Metrics)
+Quantitative analysis of model capabilities and scaling.
 
 ## Usage
 

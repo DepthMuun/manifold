@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from gfn.model import Manifold
-from tests.benchmarks.bench_utils import ResultsLogger, PerformanceStats
+from tests.benchmarks.infra.utils import ResultsLogger, PerformanceStats
 
 def plot_christoffel_vector_field(checkpoint_path=None):
     logger = ResultsLogger("vector_field", category="viz")

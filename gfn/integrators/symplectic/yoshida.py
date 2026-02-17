@@ -10,10 +10,7 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-try:
-    from gfn.geometry.boundaries import apply_boundary_python
-except ImportError:
-    def apply_boundary_python(x, tid): return x
+from gfn.geometry.boundaries import apply_boundary_python, resolve_topology_id
 
 class YoshidaIntegrator(nn.Module):
     def __init__(self, christoffel, dt=0.01):
@@ -22,6 +19,7 @@ class YoshidaIntegrator(nn.Module):
         self.dt = dt
         
         # Yoshida Coefficients (4th order)
+
         w1 = 1.0 / (2.0 - 2.0**(1.0/3.0))
         w0 = -2.0**(1.0/3.0) / (2.0 - 2.0**(1.0/3.0))
         
@@ -41,8 +39,7 @@ class YoshidaIntegrator(nn.Module):
                 U = getattr(self.christoffel, 'U', None)
                 W = getattr(self.christoffel, 'W', None)
                 if U is not None and W is not None:
-                    topology = getattr(self.christoffel, 'topology_id', 0)
-                    if hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus: topology = 1
+                    topology = resolve_topology_id(self.christoffel, kwargs.get('topology'))
                     
                     R = getattr(self.christoffel, 'R', 2.0)
                     r = getattr(self.christoffel, 'r', 1.0)
@@ -53,9 +50,7 @@ class YoshidaIntegrator(nn.Module):
         dt = self.dt * dt_scale
         
         # Determine Topology
-        topo_id = getattr(self.christoffel, 'topology_id', 0)
-        if topo_id == 0 and hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus:
-                topo_id = 1
+        topo_id = resolve_topology_id(self.christoffel, kwargs.get('topology'))
 
         # Python Implementation
         curr_x, curr_v = x, v

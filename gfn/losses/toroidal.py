@@ -59,7 +59,8 @@ def toroidal_distance_loss(x_pred, x_target):
         Toroidal distance loss scalar
     """
     dist = toroidal_dist_python(x_pred, x_target)
-    return dist.pow(2).mean()
+    # Normalize by dimension to maintain stability across different hidden sizes (e.g. 128D holographic)
+    return dist.pow(2).mean() / (x_pred.shape[-1] if x_pred.dim() > 1 else 1.0)
 
 
 class ToroidalDistanceLoss(nn.Module):

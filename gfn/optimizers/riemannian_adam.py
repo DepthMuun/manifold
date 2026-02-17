@@ -27,6 +27,10 @@ PRODUCTION RECOMMENDATION: Use retraction='normalize' for stable training.
 import torch
 from torch.optim import Optimizer
 import math
+try:
+    from gfn.geometry.boundaries import apply_boundary_python
+except ImportError:
+    def apply_boundary_python(x, tid): return x
 
 
 class RiemannianAdam(Optimizer):
@@ -232,7 +236,8 @@ class RiemannianAdam(Optimizer):
                 elif retraction == 'torus':
                     # Phase update with wrapping
                     p.data.add_(step_direction, alpha=-step_size)
-                    p.data.copy_(torch.atan2(torch.sin(p.data), torch.cos(p.data)))
+                    # Standardized boundary wrapping
+                    p.data.copy_(apply_boundary_python(p.data, topology_id=1))
                     
                     # Transport momentum for curvature
                     state['exp_avg'] = self._vector_transport(old_p, p.data, exp_avg, retraction, group)

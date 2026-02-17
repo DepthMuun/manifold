@@ -10,6 +10,7 @@ namespace cuda {
  * Adjoint Heun Backward Kernel.
  * Computes gradients for the predictor-corrector (RK2) trajectory.
  */
+template <typename scalar_t>
 __global__ void heun_backward_kernel(
     const scalar_t* __restrict__ grad_x_out,    // [batch, dim]
     const scalar_t* __restrict__ grad_v_out,    // [batch, dim]
@@ -39,7 +40,7 @@ __global__ void heun_backward_kernel(
     
     Topology topology = static_cast<Topology>(topology_id);
     scalar_t effective_dt = dt * dt_scale;
-    scalar_t h_half = 0.5f * effective_dt;
+    scalar_t h_half = static_cast<scalar_t>(0.5) * effective_dt;
     
     scalar_t lx[64];
     scalar_t lv[64];
@@ -52,8 +53,8 @@ __global__ void heun_backward_kernel(
     scalar_t* gW_b = grad_W + idx * dim * rank;
     scalar_t* gf_b = grad_force + idx * dim;
 
-    for (int i = 0; i < dim * rank; ++i) { gU_b[i] = 0; gW_b[i] = 0; }
-    for (int i = 0; i < dim; ++i) { gf_b[i] = 0; }
+    for (int i = 0; i < dim * rank; ++i) { gU_b[i] = static_cast<scalar_t>(0); gW_b[i] = static_cast<scalar_t>(0); }
+    for (int i = 0; i < dim; ++i) { gf_b[i] = static_cast<scalar_t>(0); }
     
     for (int step = steps - 1; step >= 0; --step) {
         const scalar_t* x_n = traj_x + idx * (steps + 1) * dim + step * dim;
@@ -82,7 +83,7 @@ __global__ void heun_backward_kernel(
         
         // --- ADJOINT OF STAGE 2 (acc2 at x_pred, v_pred) ---
         scalar_t gamma2[64];
-        christoffel_device(v_pred, U, W, x_pred, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gamma2);
+        christoffel_device<scalar_t>(v_pred, U, W, x_pred, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gamma2);
         
         scalar_t l_gamma2[64];
         for (int i = 0; i < dim; ++i) {
@@ -91,9 +92,9 @@ __global__ void heun_backward_kernel(
         }
         
         scalar_t gv_c[64], gx_c[64];
-        vector_zero(gv_c, dim);
-        vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma2, gamma2, v_pred, U, W, x_pred, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        vector_zero<scalar_t>(gv_c, dim);
+        vector_zero<scalar_t>(gx_c, dim);
+        christoffel_backward_device<scalar_t>(l_gamma2, gamma2, v_pred, U, W, x_pred, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gv_c, gU_b, gW_b, gx_c);
         for (int i = 0; i < dim; ++i) {
             l_v_pred[i] += gv_c[i];
             // Propagate gx_c through predictor step to lx? No, x_pred is x_n + dt*v_n
@@ -111,7 +112,7 @@ __global__ void heun_backward_kernel(
         
         // --- ADJOINT OF STAGE 1 (acc1 at x_n, v_n) ---
         scalar_t gamma1[64];
-        christoffel_device(v_n, U, W, x_n, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gamma1);
+        christoffel_device<scalar_t>(v_n, U, W, x_n, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gamma1);
         
         scalar_t l_gamma1[64];
         for (int i = 0; i < dim; ++i) {
@@ -119,9 +120,9 @@ __global__ void heun_backward_kernel(
             gf_b[i] += l_acc1[i];
         }
         
-        vector_zero(gv_c, dim);
-        vector_zero(gx_c, dim);
-        christoffel_backward_device(l_gamma1, gamma1, v_n, U, W, x_n, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gv_c, gU_b, gW_b, gx_c);
+        vector_zero<scalar_t>(gv_c, dim);
+        vector_zero<scalar_t>(gx_c, dim);
+        christoffel_backward_device<scalar_t>(l_gamma1, gamma1, v_n, U, W, x_n, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gv_c, gU_b, gW_b, gx_c);
         for (int i = 0; i < dim; ++i) {
             lx[i] = l_x_n[i] + gx_c[i];
             lv[i] = l_v_n[i] + gv_c[i];
@@ -134,11 +135,9 @@ __global__ void heun_backward_kernel(
     }
 }
 
-} // namespace cuda
-} // namespace gfn
-
 using namespace gfn::cuda;
 
+template <typename scalar_t>
 __global__ void heun_forward_traj_kernel(
     const scalar_t* x_in, const scalar_t* v_in, const scalar_t* force,
     const scalar_t* U, const scalar_t* W, 
@@ -162,7 +161,7 @@ __global__ void heun_forward_traj_kernel(
             traj_v[idx * (steps + 1) * dim + step * dim + i] = cv[i];
         }
         
-        christoffel_device(cv, U, W, cx, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gamma);
+        christoffel_device<scalar_t>(cv, U, W, cx, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gamma);
         for (int i = 0; i < dim; ++i) {
             acc1[i] = f_ptr[i] - gamma[i];
             traj_acc1[idx * steps * dim + step * dim + i] = acc1[i];
@@ -171,11 +170,11 @@ __global__ void heun_forward_traj_kernel(
         }
         apply_boundary_vector(x_pred, dim, topology);
         
-        christoffel_device(v_pred, U, W, x_pred, nullptr, dim, rank, 0.0, 1.0, 1.0, topology, R, r, gamma);
+        christoffel_device<scalar_t>(v_pred, U, W, x_pred, nullptr, dim, rank, static_cast<scalar_t>(0), static_cast<scalar_t>(1), static_cast<scalar_t>(1), topology, R, r, gamma);
         for (int i = 0; i < dim; ++i) {
             acc2[i] = f_ptr[i] - gamma[i];
-            cx[i] += (effective_dt / 2.0f) * (cv[i] + v_pred[i]);
-            cv[i] += (effective_dt / 2.0f) * (acc1[i] + acc2[i]);
+            cx[i] += (effective_dt / static_cast<scalar_t>(2.0)) * (cv[i] + v_pred[i]);
+            cv[i] += (effective_dt / static_cast<scalar_t>(2.0)) * (acc1[i] + acc2[i]);
         }
         apply_boundary_vector(cx, dim, topology);
     }
@@ -184,6 +183,9 @@ __global__ void heun_forward_traj_kernel(
         traj_v[idx * (steps + 1) * dim + steps * dim + i] = cv[i];
     }
 }
+
+} // namespace cuda
+} // namespace gfn
 
 // C++ Wrapper
 std::vector<torch::Tensor> heun_backward_cuda(
@@ -211,21 +213,25 @@ std::vector<torch::Tensor> heun_backward_cuda(
     int threads = 256;
     int blocks = (batch_size + threads - 1) / threads;
 
-    heun_forward_traj_kernel<<<blocks, threads>>>(
-        x_in.data_ptr<scalar_t>(), v_in.data_ptr<scalar_t>(), force.data_ptr<scalar_t>(),
-        U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
-        batch_size, dim, rank, dt, dt_scale, steps, topology, R, r,
-        traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(), traj_acc1.data_ptr<scalar_t>()
-    );
+    AT_DISPATCH_FLOATING_TYPES(x_in.scalar_type(), "heun_backward_cuda", ([&] {
+        gfn::cuda::heun_forward_traj_kernel<scalar_t><<<blocks, threads>>>(
+            x_in.data_ptr<scalar_t>(), v_in.data_ptr<scalar_t>(), force.data_ptr<scalar_t>(),
+            U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
+            batch_size, dim, rank, static_cast<scalar_t>(dt), static_cast<scalar_t>(dt_scale), steps, topology, 
+            static_cast<scalar_t>(R), static_cast<scalar_t>(r),
+            traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(), traj_acc1.data_ptr<scalar_t>()
+        );
 
-    heun_backward_kernel<<<blocks, threads>>>(
-        grad_x_out.data_ptr<scalar_t>(), grad_v_out.data_ptr<scalar_t>(),
-        traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(), traj_acc1.data_ptr<scalar_t>(),
-        force.data_ptr<scalar_t>(), U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
-        batch_size, dim, rank, dt, dt_scale, steps, topology, R, r,
-        grad_x_in.data_ptr<scalar_t>(), grad_v_in.data_ptr<scalar_t>(), grad_force.data_ptr<scalar_t>(),
-        grad_U.data_ptr<scalar_t>(), grad_W.data_ptr<scalar_t>()
-    );
+        gfn::cuda::heun_backward_kernel<scalar_t><<<blocks, threads>>>(
+            grad_x_out.data_ptr<scalar_t>(), grad_v_out.data_ptr<scalar_t>(),
+            traj_x.data_ptr<scalar_t>(), traj_v.data_ptr<scalar_t>(), traj_acc1.data_ptr<scalar_t>(),
+            force.data_ptr<scalar_t>(), U.data_ptr<scalar_t>(), W.data_ptr<scalar_t>(),
+            batch_size, dim, rank, static_cast<scalar_t>(dt), static_cast<scalar_t>(dt_scale), steps, topology, 
+            static_cast<scalar_t>(R), static_cast<scalar_t>(r),
+            grad_x_in.data_ptr<scalar_t>(), grad_v_in.data_ptr<scalar_t>(), grad_force.data_ptr<scalar_t>(),
+            grad_U.data_ptr<scalar_t>(), grad_W.data_ptr<scalar_t>()
+        );
+    }));
 
     return {grad_x_in, grad_v_in, grad_force, grad_U.sum(0), grad_W.sum(0)};
 }

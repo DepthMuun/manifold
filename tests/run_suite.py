@@ -15,19 +15,21 @@ def run_suite():
     print("  python tests/benchmarks/generate_report.py --checkpoint your_model.pt")
     print("\n" + "=" * 70)
     
+    # Add tests directory to path so subpackages are importable
+    sys.path.insert(0, str(Path(__file__).parent))
+    
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     
-    # 1. Discover Unit Tests
+    # Discovery root (tests/ directory)
     start_dir = str(Path(__file__).parent)
-    print(f"\n📦 Discovery in: {start_dir}")
+    print(f"\n📦 Recursive Discovery in: {start_dir}")
     
-    # Unit Tests
-    suite.addTests(loader.discover(start_dir + '/unit', pattern='test_*.py'))
-    suite.addTests(loader.discover(start_dir + '/integration', pattern='test_*.py'))
-    suite.addTests(loader.discover(start_dir + '/physics', pattern='test_*.py'))
+    # This will find all test_*.py in all subdirectories (unit, physics, functional, etc.)
+    all_tests = loader.discover(start_dir, pattern='test_*.py', top_level_dir=str(PROJECT_ROOT))
+    suite.addTests(all_tests)
     
-    runner = unittest.TextTestRunner(verbosity=2)
+    runner = unittest.TextTestRunner(verbosity=1) # Reduced verbosity for clean output
     result = runner.run(suite)
     
     if not result.wasSuccessful():
@@ -65,7 +67,7 @@ def run_suite():
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
-                timeout=120  # 2 minute timeout
+                timeout=300  # 5 minute timeout for CPU emulation stability
             )
             
             if ret.returncode == 0:

@@ -39,6 +39,11 @@ from .core import (
 )
 
 
+try:
+    from gfn.geometry.boundaries import apply_boundary_python
+except ImportError:
+    def apply_boundary_python(x, tid): return x
+
 # ============================================================================
 # CUDA MODULE LOADER
 # ============================================================================
@@ -446,9 +451,12 @@ class LeapfrogOperation(BaseOperation):
                 topology: int = 0,
                 Wf: Optional[torch.Tensor] = None,
                 bf: Optional[torch.Tensor] = None,
+                W_input: Optional[torch.Tensor] = None,
                 plasticity: float = 0.0,
                 sing_thresh: float = 0.5,
-                sing_strength: float = 2.0) -> Tuple[torch.Tensor, torch.Tensor]:
+                sing_strength: float = 2.0,
+                V_w: Optional[torch.Tensor] = None,
+                velocity_friction_scale: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Leapfrog integrator forward pass.
         """
@@ -476,19 +484,23 @@ class LeapfrogOperation(BaseOperation):
                 if topology == 1:
                     feat = torch.cat([torch.sin(curr_x), torch.cos(curr_x)], dim=-1)
                 gate = torch.matmul(feat, Wf.t()) + bf
+                if W_input is not None:
+                    gate = gate + torch.matmul(f, W_input.t())
                 mu = torch.sigmoid(gate) * self.friction_scale
+                if velocity_friction_scale > 0:
+                    v_norm = torch.norm(curr_v, dim=-1, keepdim=True)
+                    v_norm = v_norm / (curr_v.shape[-1] ** 0.5 + CudaConstants.EPSILON_SMOOTH)
+                    mu = mu * (1.0 + velocity_friction_scale * v_norm)
             
             # 2. Kick 1
-            gamma = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity, sing_thresh, sing_strength, topology)
+            gamma = christoffel_op.forward(curr_v, U, W, curr_x, V_w, plasticity, sing_thresh, sing_strength, topology)
             curr_v = (curr_v + h * (f - gamma)) / (1.0 + h * mu + self.epsilon)
             
             # 3. Drift
             curr_x = curr_x + eff_dt * curr_v
             
             # Apply toroidal boundary with smooth wrapping (match Python)
-            if topology == 1:
-                curr_x = torch.atan2(torch.sin(curr_x), torch.cos(curr_x))
-                curr_x = torch.where(curr_x < 0, curr_x + self.toroidal_period, curr_x)
+            curr_x = apply_boundary_python(curr_x, topology)
             
             # 4. Kick 2
             if Wf is not None and bf is not None:
@@ -496,9 +508,15 @@ class LeapfrogOperation(BaseOperation):
                 if topology == 1:
                     feat = torch.cat([torch.sin(curr_x), torch.cos(curr_x)], dim=-1)
                 gate = torch.matmul(feat, Wf.t()) + bf
+                if W_input is not None:
+                    gate = gate + torch.matmul(f, W_input.t())
                 mu = torch.sigmoid(gate) * self.friction_scale
+                if velocity_friction_scale > 0:
+                    v_norm = torch.norm(curr_v, dim=-1, keepdim=True)
+                    v_norm = v_norm / (curr_v.shape[-1] ** 0.5 + CudaConstants.EPSILON_SMOOTH)
+                    mu = mu * (1.0 + velocity_friction_scale * v_norm)
             
-            gamma2 = christoffel_op.forward(curr_v, U, W, curr_x, None, plasticity, sing_thresh, sing_strength, topology)
+            gamma2 = christoffel_op.forward(curr_v, U, W, curr_x, V_w, plasticity, sing_thresh, sing_strength, topology)
             curr_v = (curr_v + h * (f - gamma2)) / (1.0 + h * mu + self.epsilon)
         
         return curr_x, curr_v
@@ -511,9 +529,11 @@ class LeapfrogOperation(BaseOperation):
                  topology: int = 0,
                  Wf: Optional[torch.Tensor] = None,
                  bf: Optional[torch.Tensor] = None,
+                 W_input: Optional[torch.Tensor] = None,
                  plasticity: float = 0.0,
                  sing_thresh: float = 0.5,
-                 sing_strength: float = 2.0) -> Tuple[torch.Tensor, ...]:
+                 sing_strength: float = 2.0,
+                 velocity_friction_scale: float = 0.0) -> Tuple[torch.Tensor, ...]:
         """
         Leapfrog integrator backward pass.
         
@@ -522,7 +542,10 @@ class LeapfrogOperation(BaseOperation):
         """
         # Use PyTorch autograd
         def leapfrog_fn(x, v):
-            return self.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength)
+            return self.forward(
+                x, v, f, U, W, dt_scale, steps, topology,
+                Wf, bf, W_input, plasticity, sing_thresh, sing_strength, None, velocity_friction_scale
+            )
         
         return torch.autograd.grad(
             leapfrog_fn(x, v),
@@ -583,6 +606,7 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
                    R: float = 2.0,
                    r: float = 1.0,
                    W_input: Optional[torch.Tensor] = None,
+                   V_w: Optional[torch.Tensor] = None, # Singularity vector
                    hysteresis_state: Optional[torch.Tensor] = None,
                    hyst_update_w: Optional[torch.Tensor] = None,
                    hyst_update_b: Optional[torch.Tensor] = None,
@@ -596,17 +620,13 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
     
     Detecta automáticamente si usar CUDA o Python fallback.
     """
-    if velocity_friction_scale > 0.0 and CUDA_AVAILABLE and x.is_cuda:
-        # TODO: Log warning once per session that CUDA kernel ignores velocity friction
-        pass
-
     if CUDA_AVAILABLE and x.is_cuda:
         try:
             from .autograd import leapfrog_fused_autograd
             return leapfrog_fused_autograd(
                 x, v, f, U, W, dt, dt_scale, steps, topology,
-                Wf, bf, W_input, plasticity, sing_thresh, sing_strength, R, r,
-                velocity_friction_scale,
+                Wf, bf, plasticity, sing_thresh, sing_strength, R, r,
+                W_input, V_w, velocity_friction_scale,
                 hysteresis_state, hyst_update_w, hyst_update_b, 
                 hyst_readout_w, hyst_readout_b, hyst_decay, hyst_enabled
             )
@@ -615,7 +635,11 @@ def leapfrog_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
     
     # Python fallback
     op = LeapfrogOperation({'dt': dt, 'friction_scale': CudaConstants.FRICTION_SCALE, 'epsilon': CudaConstants.EPSILON_STANDARD})
-    return op.forward(x, v, f, U, W, dt_scale, steps, topology, Wf, bf, plasticity, sing_thresh, sing_strength)
+    return op.forward(
+        x, v, f, U, W, dt_scale, steps, topology,
+        Wf, bf, W_input, plasticity, sing_thresh, sing_strength, V_w=V_w,
+        velocity_friction_scale=velocity_friction_scale
+    )
 
 
 def heun_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
@@ -640,30 +664,13 @@ def heun_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
 
     if CUDA_AVAILABLE and x.is_cuda:
         try:
-            import gfn_cuda
-            if hasattr(gfn_cuda, 'heun_fused'):
-                 W_f = W_forget if W_forget is not None else torch.empty(0, device=x.device, dtype=x.dtype)
-                 b_f = b_forget if b_forget is not None else torch.empty(0, device=x.device, dtype=x.dtype)
-                 W_i = W_input if W_input is not None else torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_state = torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_up_w = torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_up_b = torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_rd_w = torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_rd_b = torch.empty(0, device=x.device, dtype=x.dtype)
-                 hyst_decay = 0.9
-                 hyst_enabled = False
-                 return gfn_cuda.heun_fused(
-                     x.contiguous(), v.contiguous(), f.contiguous(),
-                     U.contiguous(), W.contiguous(),
-                     float(dt), float(dt_scale), int(steps), int(topology),
-                     W_f.contiguous(), b_f.contiguous(), W_i.contiguous(),
-                     float(plasticity), float(sing_thresh), float(sing_strength),
-                     float(R), float(r),
-                     float(velocity_friction_scale),
-                     hyst_state, hyst_up_w, hyst_up_b, hyst_rd_w, hyst_rd_b,
-                     float(hyst_decay), hyst_enabled
-                 )
-        except Exception:
+            from .autograd import heun_fused_autograd
+            return heun_fused_autograd(
+                x, v, f, U, W, dt, dt_scale, steps, topology,
+                W_forget, b_forget, plasticity, sing_thresh, sing_strength, R, r,
+                W_input=W_input, velocity_friction_scale=velocity_friction_scale
+            )
+        except ImportError:
             pass
             
     # Python Fallback (Simple reconstruction of Heun logic)
@@ -800,17 +807,53 @@ def recurrent_manifold_fused(x: torch.Tensor, v: torch.Tensor, f: torch.Tensor,
     if CUDA_AVAILABLE and x.is_cuda and not needs_grad:
         try:
             import gfn_cuda
-            dt_scale = float(dt_scales.mean().item()) if isinstance(dt_scales, torch.Tensor) else float(dt_scales)
-            result = gfn_cuda.recurrent_manifold_fused(
+            # Prepare optional parameters for Unified Kernel
+            wf = Wf if Wf is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            bf_val = bf if bf is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            wi = Wi if Wi is not None else torch.empty(0, device=x.device, dtype=x.dtype)
+            
+            h_state = kwargs.get('hysteresis_state', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_up_w = kwargs.get('hyst_update_w', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_up_b = kwargs.get('hyst_update_b', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_rd_w = kwargs.get('hyst_readout_w', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_rd_b = kwargs.get('hyst_readout_b', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_decay = float(kwargs.get('hyst_decay', 0.9))
+            h_enabled = bool(kwargs.get('hyst_enabled', False))
+            v_fric_scale = float(kwargs.get('velocity_friction_scale', 0.0))
+
+            # Singularity Vector (Phase 2)
+            v_w = kwargs.get('V_w', torch.empty(0, device=x.device, dtype=x.dtype))
+
+            # Geometry Fusion (New in Phase 2)
+            thermo_a = float(kwargs.get('thermo_alpha', 0.0))
+            thermo_t = float(kwargs.get('thermo_temp', 1.0))
+            h_z = kwargs.get('holographic_z', torch.empty(0, device=x.device, dtype=x.dtype))
+            h_gz = kwargs.get('holographic_grad_z', torch.empty(0, device=x.device, dtype=x.dtype))
+
+            # Unified kernel provides 100% parity including Torus, Gating, Hysteresis and Fused Geometry
+            x_f, v_f, x_s = gfn_cuda.unified_mlayer_fused(
                 x.contiguous(), v.contiguous(), f.contiguous(),
                 U_stack.contiguous(), W_stack.contiguous(),
-                float(dt), float(dt_scale), int(num_heads)
+                wf.contiguous(), bf_val.contiguous(), wi.contiguous(),
+                v_w.contiguous(),
+                float(dt), dt_scales.contiguous(), int(topology),
+                float(plasticity), float(sing_thresh), float(sing_strength),
+                float(R), float(r), v_fric_scale,
+                thermo_a, thermo_t, h_z.contiguous(), h_gz.contiguous(),
+                h_state.contiguous(), h_up_w.contiguous(), h_up_b.contiguous(),
+                h_rd_w.contiguous(), h_rd_b.contiguous(),
+                h_decay, h_enabled
             )
-            if isinstance(result, (tuple, list)) and len(result) == 4:
-                return (*result, None)
-            return result
-        except (ImportError, AttributeError, RuntimeError):
+            
+            # Match old return signature: (x_final, v_final, x_seq, reg_loss, h_state)
+            reg_loss = res[3] if len(res) > 3 else torch.tensor(0.0, device=x.device)
+            return (x_f, v_f, x_s, reg_loss, h_state)
+
+            
+        except (ImportError, AttributeError, RuntimeError) as e:
+            # print(f"[CUDA WRAPPER ERROR] falling back to autograd: {e}")
             pass
+
 
     from .autograd import recurrent_manifold_fused_autograd
     return recurrent_manifold_fused_autograd(

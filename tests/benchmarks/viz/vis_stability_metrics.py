@@ -21,7 +21,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from gfn.model import Manifold
 from gfn.optim import RiemannianAdam
 from gfn.losses import hamiltonian_loss
-from tests.benchmarks.bench_utils import ResultsLogger, PerformanceStats
+from tests.benchmarks.infra.utils import ResultsLogger, PerformanceStats
 
 def run_stability_test(steps=500):
     logger = ResultsLogger("stability", category="viz")

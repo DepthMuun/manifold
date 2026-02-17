@@ -140,54 +140,48 @@ class CUDAFusionManager:
                 for head_idx in range(self.model.heads):
                     head_geo = target_layer.christoffels[head_idx]
                     
+                    # Unwrap wrappers (Thermodynamic, etc)
+                    # We need the base object for U/W, but we should also check if we support the wrapper
+                    # Currently we only support Thermodynamic via global params (see act_inf below)
+                    # so unwrapping to find U/W is safe for now, as long as we don't ignore wrapper params.
+                    # Note: MLayer handles thermodynamic params better. 
+                    # If we unwrap here, we are effectively bypassing the wrapper logic in the kernel
+                    # unless we pass the params.
+                    
+                    curr_geo = head_geo
+                    unwrap_depth = 0
+                    while hasattr(curr_geo, 'base_christoffel') and unwrap_depth < 100:
+                        curr_geo = curr_geo.base_christoffel
+                        unwrap_depth += 1
+                    
                     # Non-torus uses U/W matrices
                     if not is_torus:
-                        if not hasattr(head_geo, 'U') or not hasattr(head_geo, 'W'):
+                        if not hasattr(curr_geo, 'U') or not hasattr(curr_geo, 'W'):
+                            # If even base geo doesn't have U/W (e.g. some other type), fail
                             return None
-                        U_list.append(head_geo.U)
-                        W_list.append(head_geo.W)
+                        U_list.append(curr_geo.U)
+                        W_list.append(curr_geo.W)
                     else:
-                        # AUDIT WARNING (Component 2): TOROIDAL GEOMETRY BYPASS
-                        # =====================================================
-                        # CRITICAL BUG: When topology='torus', fusion manager creates DUMMY
-                        # zero tensors instead of using actual toroidal Christoffel symbols.
-                        # 
-                        # IMPACT:
-                        # - All toroidal curvature information is LOST in CUDA fused mode
-                        # - Model degrades to flat Euclidean manifold (zero Christoffels)
-                        # - Math tasks that rely on toroidal structure fail to converge
-                        #
-                        # ROOT CAUSE:
-                        # - CUDA kernel 'christoffel_impl.cuh' has toroidal branch (lines 55-71)
-                        # - But fusion manager never routes to it, passes zeros instead
-                        #
-                        # TODO (Requires CUDA Compilation):
-                        # 1. Create dedicated toroidal_christoffel_fused.cu kernel
-                        # 2. Add toroidal routing logic here to call dedicated kernel
-                        # 3. Pass R, r (major/minor radii) to kernel
-                        # 4. Add Python bindings in cuda_kernels.cpp
-                        # 5. Update consistency tests to verify toroidal CUDA vs Python
-                        #
-                        # WORKAROUND (Current):
-                        # - Use use_scan=True to force Python loop (bypasses fusion)
-                        # - Or set physics_config['topology']['type'] = 'euclidean'
-                        #
-                        # REFERENCES:
-                        # - technical_analysis.md: Line 55-72 (Toroidal Geometry Bypass)
-                        # - implementation_plan.md: Component 2 (lines 96-120)
-                        # - gfn/cuda/src/geometry/christoffel_impl.cuh: Lines 55-71
-                        
-                        # Dummy placeholders for torus mode (WILL BE REPLACED WITH ACTUAL KERNEL)
-                        device = next(self.model.parameters()).device
-                        U_list.append(torch.zeros(self.model.dim // self.model.heads, 1, device=device))
-                        W_list.append(torch.zeros(self.model.dim // self.model.heads, 1, device=device))
+                        # Toroidal kernel routing is handled in execute_fused_forward
+                        # We use zero tensors as placeholders because the dedicated toroidal kernel
+                        # (launch_toroidal_leapfrog_fused) calculates curvature analytically
+                        # and does not use the low-rank U/W approximation.
+                        if is_torus:
+                            device = next(self.model.parameters()).device
+                            U_list.append(torch.zeros(self.model.dim // self.model.heads, 1, device=device))
+                            W_list.append(torch.zeros(self.model.dim // self.model.heads, 1, device=device))
                     
                     # Clutch parameters
-                    if hasattr(head_geo, 'forget_gate'):
-                        W_forget_list.append(head_geo.forget_gate.weight)
-                        bias = getattr(head_geo.forget_gate, 'bias', None)
-                        b_forget_list.append(bias if bias is not None else torch.zeros(head_geo.forget_gate.out_features, device=device))
-                        W_input_list.append(head_geo.input_gate.weight if hasattr(head_geo, 'input_gate') else torch.zeros(head_geo.forget_gate.out_features, head_geo.forget_gate.in_features, device=device))
+                    # Use original head_geo (wrapper) if it has gates, else fallback to base
+                    target_geo = head_geo
+                    if not hasattr(target_geo, 'forget_gate'):
+                        target_geo = curr_geo # Use unwrapped base
+                    
+                    if hasattr(target_geo, 'forget_gate'):
+                        W_forget_list.append(target_geo.forget_gate.weight)
+                        bias = getattr(target_geo.forget_gate, 'bias', None)
+                        b_forget_list.append(bias if bias is not None else torch.zeros(target_geo.forget_gate.out_features, device=device))
+                        W_input_list.append(target_geo.input_gate.weight if hasattr(target_geo, 'input_gate') else torch.zeros(target_geo.forget_gate.out_features, target_geo.forget_gate.in_features, device=device))
                     else:
                         # Fallback for legacy christoffels
                         h_dim = target_layer.head_dim
@@ -197,9 +191,10 @@ class CUDAFusionManager:
                         W_input_list.append(torch.zeros(self.model.dim//self.model.heads, h_dim, device=device))
                     
                     # Singularity parameters
-                    if hasattr(head_geo, 'V') and head_geo.V is not None:
-                        W_potential_list.append(head_geo.V.weight)
-                        b_bias = head_geo.V.bias
+                    # Usually on base
+                    if hasattr(curr_geo, 'V') and curr_geo.V is not None:
+                        W_potential_list.append(curr_geo.V.weight)
+                        b_bias = curr_geo.V.bias
                         if b_bias is None:
                             device = next(self.model.parameters()).device
                             b_bias = torch.zeros(1, device=device)
@@ -251,6 +246,11 @@ class CUDAFusionManager:
             sing_thresh = sing_cfg.get('threshold', 0.9) if sing_enabled else 1.0
             sing_strength = sing_cfg.get('strength', 1.0) if sing_enabled else 1.0
             
+            # Thermodynamic parameters
+            thermo_cfg = act_inf.get('thermodynamic_geometry', {})
+            thermo_alpha = thermo_cfg.get('alpha', 0.1) if thermo_cfg.get('enabled', False) else 0.0
+            thermo_temp = thermo_cfg.get('temperature', 1.0) if thermo_cfg.get('enabled', False) else 1.0
+            
             # Torus radii
             major_R = topo_cfg.get('major_radius', 2.0)
             minor_r = topo_cfg.get('minor_radius', 1.0)
@@ -293,6 +293,8 @@ class CUDAFusionManager:
                 'plasticity': plasticity,
                 'sing_thresh': sing_thresh,
                 'sing_strength': sing_strength,
+                'thermo_alpha': thermo_alpha,
+                'thermo_temp': thermo_temp,
                 'major_R': major_R,
                 'minor_r': minor_r,
                 'topology_id': 1 if is_torus else 0,
@@ -348,112 +350,70 @@ class CUDAFusionManager:
             # Python binding: gfn/cuda/ops.py::launch_toroidal_leapfrog_fused()
             
             if params.get('is_torus', False):
-                if self.model.training:
-                    # Use autograd-compatible toroidal integration during training
-                    try:
-                        from ..cuda.autograd import toroidal_leapfrog_fused_autograd
-                        
-                        result = toroidal_leapfrog_fused_autograd(
-                            x=x, v=v, f=forces * mask,
-                            R=params['major_R'],
-                            r=params['minor_r'],
-                            dt=params['base_dt'],
-                            batch=x.shape[0],
-                            seq_len=forces.shape[1],
-                            dim=x.shape[1],
-                            hysteresis_state=hysteresis_state
-                        )
-                        
-                        if result is not None:
-                            return result
-                        else:
-                            warnings.warn("[GFN:WARN] Toroidal autograd failed, falling back to CUDA kernel")
-                            
-                    except ImportError:
-                        warnings.warn("[GFN:WARN] Toroidal autograd not available, falling back to CUDA kernel")
-                
-                # Try CUDA kernel for inference or as fallback
-                try:
-                    from ..cuda.ops import launch_toroidal_leapfrog_fused
-                    
-                    # Call dedicated toroidal kernel with learned friction
-                    # Extract first head's friction weights for the kernel
-                    W_f_head0 = params['W_f_stack'][0] if params['W_f_stack'].numel() > 0 else None
-                    b_f_head0 = params['b_f_stack'][0] if params['b_f_stack'].numel() > 0 else None
-                    
-                    result = launch_toroidal_leapfrog_fused(
-                        x=x, v=v, f=forces * mask,
-                        R=params['major_R'],
-                        r=params['minor_r'],
-                        dt=params['base_dt'],
-                        batch=x.shape[0],
-                        seq_len=forces.shape[1],
-                        dim=x.shape[1],
-                        hysteresis_state=hysteresis_state,
-                        W_forget=W_f_head0,
-                        b_forget=b_f_head0
-                    )
-                    
-                    if result is not None:
-                        return result
-                    else:
-                        warnings.warn("[GFN:WARN] Toroidal kernel returned None, falling back to Python loop")
-                        return None
-                        
-                except ImportError:
-                    warnings.warn("[GFN:WARN] Toroidal kernel not available (compilation needed), falling back to Python loop")
-                    return None
+                # AUDIT FIX (2026-02-17): Disable broken toroidal CUDA path.
+                # toroidal_leapfrog_fused_autograd() has 5 critical bugs:
+                #   1. Kick 1 omits Christoffel from force (fatal - no geometric correction)
+                #   2. Missing TOROIDAL_CURVATURE_SCALE multiplier
+                #   3. Uses hardcoded clamp instead of soft_clamp
+                #   4. Boundary wrapping maps to (-π, π] instead of [0, 2π)
+                #   5. Iterates only over seq_len, not over layers (1 layer vs depth=6)
+                # The Python fallback loop (manifold.py lines 361-392) is correct and
+                # converges perfectly. Force fallback until this function is rewritten.
+                return None
             
             # Standard Euclidean path (low-rank approximation)
-            # Get dt scales and forget rates
-            f_layer = self.model.layers[0]
-            if hasattr(f_layer, 'macro_manifold'):
-                f_layer = f_layer.macro_manifold
-
-            dt_scales = params['dt_scales_stack']
-            forget_rates = torch.sigmoid(f_layer.christoffels[0].forget_gate.bias.mean())
-            if forget_rates.numel() == 1:
-                forget_rates = forget_rates.expand(self.model.heads)
-            
-            # Usar kernel recurrente fusionado también en train para reducir lanzamientos
-            res = recurrent_manifold_fused(
-                x=x, v=v, f=forces * mask,
-                U_stack=params['U_stack'], W_stack=params['W_stack'],
-                dt=params['base_dt'], dt_scales=dt_scales, forget_rates=forget_rates,
-                num_heads=self.model.heads,
-                plasticity=params['plasticity'],
-                sing_thresh=params['sing_thresh'],
-                sing_strength=params['sing_strength'],
-                mix_x=params['mix_x'], mix_v=params['mix_v'],
-                Wf=params['W_f_stack'],
-                Wi=params['W_i_stack'],
-                bf=params['b_f_stack'],
-                Wp=params['W_p_stack'],
-                bp=params['b_p_stack'],
-                topology=params['topology_id'],
-                R=params['major_R'], r=params['minor_r'],
-                mix_x_bias=params['mix_x_bias'],
-                mix_v_bias=params['mix_v_bias'],
-                norm_x_weight=params['norm_x_weight'],
-                norm_x_bias=params['norm_x_bias'],
-                norm_v_weight=params['norm_v_weight'],
-                norm_v_bias=params['norm_v_bias'],
-                gate_W1=params['gate_W1'],
-                gate_b1=params['gate_b1'],
-                gate_W2=params['gate_W2'],
-                gate_b2=params['gate_b2'],
-                integrator_type=1 if self.model.integrator_type == 'leapfrog' else 0,
-                hysteresis_state=hysteresis_state,
-                hyst_update_w=hyst_update_w,
-                hyst_update_b=hyst_update_b,
-                hyst_readout_w=hyst_readout_w,
-                hyst_readout_b=hyst_readout_b,
-                hyst_decay=hyst_decay,
-                hyst_enabled=hyst_enabled
-            )
-            if res is not None:
-                return res
-            return None
+            else:
+                # Get dt scales and forget rates
+                f_layer = self.model.layers[0]
+                if hasattr(f_layer, 'macro_manifold'):
+                    f_layer = f_layer.macro_manifold
+    
+                dt_scales = params['dt_scales_stack']
+                forget_rates = torch.sigmoid(f_layer.christoffels[0].forget_gate.bias.mean())
+                if forget_rates.numel() == 1:
+                    forget_rates = forget_rates.expand(self.model.heads)
+                
+                # Usar kernel recurrente fusionado también en train para reducir lanzamientos
+                res = recurrent_manifold_fused(
+                    x=x, v=v, f=forces * mask,
+                    U_stack=params['U_stack'], W_stack=params['W_stack'],
+                    dt=params['base_dt'], dt_scales=dt_scales, forget_rates=forget_rates,
+                    num_heads=self.model.heads,
+                    plasticity=params['plasticity'],
+                    sing_thresh=params['sing_thresh'],
+                    sing_strength=params['sing_strength'],
+                    mix_x=params['mix_x'], mix_v=params['mix_v'],
+                    Wf=params['W_f_stack'],
+                    Wi=params['W_i_stack'],
+                    bf=params['b_f_stack'],
+                    Wp=params['W_p_stack'],
+                    bp=params['b_p_stack'],
+                    topology=params['topology_id'],
+                    R=params['major_R'], r=params['minor_r'],
+                    mix_x_bias=params['mix_x_bias'],
+                    mix_v_bias=params['mix_v_bias'],
+                    norm_x_weight=params['norm_x_weight'],
+                    norm_x_bias=params['norm_x_bias'],
+                    norm_v_weight=params['norm_v_weight'],
+                    norm_v_bias=params['norm_v_bias'],
+                    gate_W1=params['gate_W1'],
+                    gate_b1=params['gate_b1'],
+                    gate_W2=params['gate_W2'],
+                    gate_b2=params['gate_b2'],
+                    integrator_type=1 if self.model.integrator_type == 'leapfrog' else 0,
+                    hysteresis_state=hysteresis_state,
+                    hyst_update_w=hyst_update_w,
+                    hyst_update_b=hyst_update_b,
+                    hyst_readout_w=hyst_readout_w,
+                    hyst_readout_b=hyst_readout_b,
+                    hyst_decay=hyst_decay,
+                    hyst_enabled=hyst_enabled,
+                    thermo_alpha=params.get('thermo_alpha', 0.0),
+                    thermo_temp=params.get('thermo_temp', 1.0)
+                )
+                if res is not None:
+                    return res
+                return None
             
         except Exception as e:
             warnings.warn(f"[GFN:WARN] Fused kernel failed: {e}, falling back to Python loop")

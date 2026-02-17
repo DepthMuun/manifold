@@ -46,7 +46,7 @@ def apply_boundary_python(x, topology_id):
     return x
 
 
-def apply_velocity_correction(v, x_old, x_new, topology_id):
+def apply_velocity_correction(v, x_old, x_new, topology_id, dt=1.0):
     """
     Correct velocity for toroidal boundary crossings.
     
@@ -78,9 +78,9 @@ def apply_velocity_correction(v, x_old, x_new, topology_id):
     # Compute wrapped displacement with smooth gradients
     wrapped_disp = torch.atan2(torch.sin(apparent_disp), torch.cos(apparent_disp))
     
-    # True displacement should be the wrapped version
-    # This captures boundary crossings correctly
-    return wrapped_disp
+    if dt == 0:
+        dt = 1.0
+    return wrapped_disp / dt
 
 
 def toroidal_dist_python(x1, x2):
@@ -99,12 +99,54 @@ def toroidal_dist_python(x1, x2):
         x2: Position tensor [batch, dim]
         
     Returns:
-        Shortest distance tensor [batch]
+        Distance tensor
     """
     PI = 3.14159265359
-    TWO_PI = 2.0 * PI
-    # AUDIT FIX: Use atan2 for smooth distance with continuous gradients
     diff = x1 - x2
-    diff_wrapped = torch.atan2(torch.sin(diff), torch.cos(diff))
-    # Return shortest path: min(|diff|, 2π - |diff|)
-    return torch.abs(diff_wrapped)
+    # Wrap difference to [-pi, pi]
+    diff = torch.atan2(torch.sin(diff), torch.cos(diff))
+    return torch.norm(diff, dim=-1)
+
+
+def resolve_topology_id(christoffel, topology_id_arg=None):
+    """
+    Resolve topology ID from Christoffel geometry or argument.
+    
+    Args:
+        christoffel: The Christoffel geometry object
+        topology_id_arg: Optional override from kwargs
+        
+    Returns:
+        Integer topology ID (0=Euclidean, 1=Torus)
+    """
+    # 1. Use argument if provided
+    if topology_id_arg is not None:
+        return topology_id_arg
+        
+    # 2. Check Christoffel attribute
+    tid = getattr(christoffel, 'topology_id', 0)
+    
+    # 3. Check legacy boolean flag
+    if tid == 0 and hasattr(christoffel, 'is_torus') and christoffel.is_torus:
+        return 1
+        
+    return tid
+
+
+def get_boundary_features(x, topology_id):
+    """
+    Extract features relevant to the topology boundary.
+    
+    For Euclidean (0): Returns x
+    For Toroidal (1): Returns [sin(x), cos(x)]
+    
+    Args:
+        x: Position tensor [batch, dim]
+        topology_id: Integer topology identifier
+        
+    Returns:
+        Feature tensor [batch, dim] or [batch, 2*dim]
+    """
+    if topology_id == 1:
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+    return x

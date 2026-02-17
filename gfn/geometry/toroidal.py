@@ -97,27 +97,22 @@ class ToroidalChristoffel(nn.Module):
         
         gamma = torch.zeros_like(v)
         
-        # N-dimensional torus logic: 
-        # For each pair (i, i+1):
-        # Gamma^i_{i+1, i+1} = (R + r cos x_i) sin x_i / r
-        # Gamma^{i+1}_{i+1, i} = - (r sin x_i) / (R + r cos x_i)
+        # Vectorized N-dimensional torus logic: 
+        # even indices are theta (inner), odd indices are phi (outer)
+        th = x[..., 0::2]
+        v_th = v[..., 0::2]
+        v_ph = v[..., 1::2]
         
-        for i in range(0, self.dim - 1, 2):
-            th = x[..., i]
-            v_th = v[..., i]
-            v_ph = v[..., i+1]
-            
-            # Double protection against division by zero
-            # 1. Clamp the denominator to prevent near-zero values
-            denom = torch.clamp(self.R + self.r * torch.cos(th), min=CLAMP_MIN_STRONG)
-            
-            # 2. Add epsilon in division for extra safety
-            term_th = denom * torch.sin(th) / (self.r + EPSILON_SMOOTH)
-            gamma[..., i] = term_th * (v_ph ** 2)
-            
-            # Double epsilon protection for the second term
-            term_ph = -(self.r * torch.sin(th)) / (denom + EPSILON_SMOOTH)
-            gamma[..., i+1] = 2.0 * term_ph * v_ph * v_th
+        # Double protection against division by zero
+        denom = torch.clamp(self.R + self.r * torch.cos(th), min=CLAMP_MIN_STRONG)
+        
+        # Gamma^i_{i+1, i+1} = (R + r cos x_i) sin x_i / r
+        term_th = denom * torch.sin(th) / (self.r + EPSILON_SMOOTH)
+        gamma[..., 0::2] = term_th * (v_ph ** 2)
+        
+        # Gamma^{i+1}_{i+1, i} = - (r sin x_i) / (R + r cos x_i)
+        term_ph = -(self.r * torch.sin(th)) / (denom + EPSILON_SMOOTH)
+        gamma[..., 1::2] = 2.0 * term_ph * v_ph * v_th
             
         gamma = gamma * TOROIDAL_CURVATURE_SCALE  # Strong Curvature (User Requested Full Torus)
         

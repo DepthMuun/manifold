@@ -93,11 +93,14 @@ __device__ void christoffel_distributed_heun(
             sincos_scalar(th, &s, &c);
             
             scalar_t denom = R + r * c;
-            denom = (denom < CLAMP_MIN_STRONG) ? CLAMP_MIN_STRONG : denom;
-            scalar_t term_th = denom * s / (r + EPSILON_SMOOTH);
+            denom = (denom < static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>)) ? static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>) : denom;
+            scalar_t term_th = denom * s / (r + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
             scalar_t g0 = term_th * (v_ph * v_ph);
             
-            *gamma_val = soft_clamp(g0 * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+            *gamma_val = soft_clamp<scalar_t>(
+                static_cast<scalar_t>(g0) * static_cast<scalar_t>(TOROIDAL_CURVATURE_SCALE<scalar_t>),
+                static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>)
+            );
         } else if (tid % 2 != 0) {
             scalar_t th = x_shared[tid - 1];
             scalar_t v_ph = v_val;
@@ -106,11 +109,14 @@ __device__ void christoffel_distributed_heun(
             sincos_scalar(th, &s, &c);
             
             scalar_t denom = R + r * c;
-            denom = (denom < CLAMP_MIN_STRONG) ? CLAMP_MIN_STRONG : denom;
-            scalar_t term_ph = -(r * s) / (denom + EPSILON_SMOOTH);
+            denom = (denom < static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>)) ? static_cast<scalar_t>(CLAMP_MIN_STRONG<scalar_t>) : denom;
+            scalar_t term_ph = -(r * s) / (denom + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
             scalar_t g1 = 2.0f * term_ph * v_ph * v_th;
             
-            *gamma_val = soft_clamp(g1 * TOROIDAL_CURVATURE_SCALE, CURVATURE_CLAMP);
+            *gamma_val = soft_clamp<scalar_t>(
+                static_cast<scalar_t>(g1) * static_cast<scalar_t>(TOROIDAL_CURVATURE_SCALE<scalar_t>),
+                static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>)
+            );
         }
         return;
     }
@@ -138,8 +144,14 @@ __device__ void christoffel_distributed_heun(
         if (rank > 0) energy /= static_cast<scalar_t>(rank);
         
         scalar_t norm = sqrt(energy);
-        S_shared = 1.0f / (1.0f + norm + EPSILON_STANDARD);
-        M_shared = 1.0f;
+        S_shared = static_cast<scalar_t>(1) / (static_cast<scalar_t>(1) + norm + static_cast<scalar_t>(EPSILON_STANDARD<scalar_t>));
+        
+        // PARITY FIX: Plasticity modulation (was hardcoded M=1.0)
+        M_shared = static_cast<scalar_t>(1);
+        if (plasticity > static_cast<scalar_t>(1e-6) || plasticity < static_cast<scalar_t>(-1e-6)) {
+            scalar_t v_energy = energy; // Reuse normalized energy
+            M_shared += plasticity * static_cast<scalar_t>(0.1) * tanh(v_energy);
+        }
     }
     __syncthreads();
     
@@ -151,7 +163,7 @@ __device__ void christoffel_distributed_heun(
         sum_gamma += W[tid * rank + k] * h_sq;
     }
     
-    *gamma_val = soft_clamp(sum_gamma, CURVATURE_CLAMP);
+    *gamma_val = soft_clamp<scalar_t>(static_cast<scalar_t>(sum_gamma), static_cast<scalar_t>(CURVATURE_CLAMP<scalar_t>));
 }
 
 // ============================================================================
@@ -209,11 +221,11 @@ __device__ void friction_distributed_heun(
         gate_sum += input_sum;
     }
     
-    scalar_t base_friction = sigmoid(gate_sum) * FRICTION_SCALE;
+    scalar_t base_friction = sigmoid(gate_sum) * static_cast<scalar_t>(FRICTION_SCALE<scalar_t>);
     
     // 4. Velocity Scaling
     if (velocity_friction_scale > 0.0f) {
-        scalar_t v_scale = v_norm / (sqrt(static_cast<scalar_t>(dim)) + EPSILON_SMOOTH);
+        scalar_t v_scale = v_norm / (sqrt(static_cast<scalar_t>(dim)) + static_cast<scalar_t>(EPSILON_SMOOTH<scalar_t>));
         *friction_val = base_friction * (1.0f + velocity_friction_scale * v_scale);
     } else {
         *friction_val = base_friction;
@@ -410,7 +422,8 @@ __global__ void heun_fused_kernel(
                 sum += input_shared[j] * hyst_update_w[tid * hyst_in_dim + j];
             }
             
-            hyst_val = hyst_val * hyst_decay + tanhf(sum);
+            // PARITY FIX: Match physics_library.cuh hysteresis formula
+            hyst_val = hyst_val * (1.0f - hyst_decay) + tanhf(sum) * hyst_decay;
         }
     }
     
@@ -466,6 +479,7 @@ std::vector<torch::Tensor> heun_fused(
     int batch_size = x.size(0);
     int dim = x.size(1);
     int rank = U.size(1);
+    TORCH_CHECK(dim > 0 && dim <= 1024, "heun_fused requires 1 <= dim <= 1024");
     
     auto x_out = torch::empty_like(x);
     auto v_out = torch::empty_like(v);

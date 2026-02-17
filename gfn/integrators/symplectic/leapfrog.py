@@ -42,44 +42,22 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-try:
-    from gfn.geometry.boundaries import apply_boundary_python
-except ImportError:
-    def apply_boundary_python(x, tid): return x
+from gfn.geometry.boundaries import apply_boundary_python, resolve_topology_id, get_boundary_features
 
 try:
-    from gfn.constants import FRICTION_SCALE, EPSILON_STANDARD, DEFAULT_DT
+    from gfn.constants import (
+        FRICTION_SCALE,
+        EPSILON_STANDARD,
+        EPSILON_SMOOTH,
+        DEFAULT_DT,
+        VELOCITY_FRICTION_SCALE,
+    )
 except ImportError:
     FRICTION_SCALE = 0.02
     EPSILON_STANDARD = 1e-7
+    EPSILON_SMOOTH = 1e-7
     DEFAULT_DT = 0.05
-
-
-def smooth_boundary_wrap(x, topology_id=1):
-    """
-    AUDIT FIX: Smooth boundary wrapping with differentiable gradients.
-    
-    Instead of using torch.remainder which has discontinuous gradients at
-    boundaries, this function uses atan2(sin, cos) for smooth wrapping.
-    
-    For topology_id == 1 (torus): wraps to [-π, π] with smooth gradients
-    For topology_id == 0 (euclidean): no wrapping
-    
-    Args:
-        x: Input tensor
-        topology_id: Topology identifier (0=euclidean, 1=torus)
-    
-    Returns:
-        Wrapped tensor with smooth gradients
-    """
-    if topology_id == 0:
-        return x
-
-    x_wrapped = torch.atan2(torch.sin(x), torch.cos(x))
-    two_pi = 2.0 * torch.pi
-    x_wrapped = torch.where(x_wrapped < 0, x_wrapped + two_pi, x_wrapped)
-    return x_wrapped
-
+    VELOCITY_FRICTION_SCALE = 0.0
 
 
 class LeapfrogIntegrator(nn.Module):
@@ -108,16 +86,29 @@ class LeapfrogIntegrator(nn.Module):
                 # Logic matrices
                 U = getattr(self.christoffel, 'U', None)
                 W = getattr(self.christoffel, 'W', None)
+                V_w = getattr(self.christoffel, 'V_w', None)
                 
                 if U is not None and W is not None:
-                    topology_id = kwargs.get('topology', getattr(self.christoffel, 'topology_id', 0))
+                    topology_id = resolve_topology_id(self.christoffel, kwargs.get('topology'))
                     Wf = kwargs.get('W_forget_stack', None)
+
                     bf = kwargs.get('b_forget_stack', None)
+                    Wi = kwargs.get('W_input_stack', None)
+                    velocity_friction_scale = kwargs.get(
+                        'velocity_friction_scale',
+                        getattr(self.christoffel, 'velocity_friction_scale', VELOCITY_FRICTION_SCALE),
+                    )
                     if Wf is not None and Wf.dim() == 3:
                         Wf = Wf[0]
                     if bf is not None and bf.dim() == 2:
                         bf = bf[0]
-                    res_fused = leapfrog_fused(x, v, force, U, W, self.dt, dt_scale, steps=steps, topology=topology_id, Wf=Wf, bf=bf)
+                    if Wi is not None and Wi.dim() == 3:
+                        Wi = Wi[0]
+                    res_fused = leapfrog_fused(
+                        x, v, force, U, W, self.dt, dt_scale, steps=steps, topology=topology_id,
+                        Wf=Wf, bf=bf, W_input=Wi, V_w=V_w,
+                        velocity_friction_scale=velocity_friction_scale,
+                    )
                     if isinstance(res_fused, tuple) and len(res_fused) == 3:
                         xf, vf, _ = res_fused
                         return xf, vf
@@ -134,9 +125,7 @@ class LeapfrogIntegrator(nn.Module):
         self.christoffel.return_friction_separately = True
         
         # Get topology_id
-        topology_id = kwargs.get('topology', getattr(self.christoffel, 'topology_id', 0))
-        if topology_id == 0 and hasattr(self.christoffel, 'is_torus') and self.christoffel.is_torus:
-             topology_id = 1
+        topology_id = resolve_topology_id(self.christoffel, kwargs.get('topology'))
         
         try:
             for i in range(steps):
@@ -159,17 +148,31 @@ class LeapfrogIntegrator(nn.Module):
                 # Get friction from gate if needed
                 Wf = kwargs.get('W_forget_stack', None)
                 bf = kwargs.get('b_forget_stack', None)
+                Wi = kwargs.get('W_input_stack', None)
+                velocity_friction_scale = kwargs.get(
+                    'velocity_friction_scale',
+                    getattr(self.christoffel, 'velocity_friction_scale', VELOCITY_FRICTION_SCALE),
+                )
                 
                 if Wf is not None and bf is not None:
                     if Wf.dim() == 3:
                         Wf = Wf[0]
                     if bf.dim() == 2:
                         bf = bf[0]
-                    feat = curr_x
-                    if topology_id == 1:
-                        feat = torch.cat([torch.sin(curr_x), torch.cos(curr_x)], dim=-1)
+                    
+                    # AUDIT FIX: Centralized boundary features
+                    feat = get_boundary_features(curr_x, topology_id)
+                    
                     gate = torch.matmul(feat, Wf.t()) + bf
-                    mu = torch.sigmoid(gate) * FRICTION_SCALE  # PRODUCTION: Use updated constant
+                    if Wi is not None:
+                        if Wi.dim() == 3:
+                            Wi = Wi[0]
+                        gate = gate + torch.matmul(force, Wi.t())
+                    mu = torch.sigmoid(gate) * FRICTION_SCALE
+                    if velocity_friction_scale > 0:
+                        v_norm = torch.norm(curr_v, dim=-1, keepdim=True)
+                        v_norm = v_norm / (curr_v.shape[-1] ** 0.5 + EPSILON_SMOOTH)
+                        mu = mu * (1.0 + velocity_friction_scale * v_norm)
 
                 # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-7
                 # v_half = (curr_v + h*(F - Gamma)) / (1 + h*mu + eps)
@@ -179,7 +182,7 @@ class LeapfrogIntegrator(nn.Module):
                 curr_x = curr_x + effective_dt * v_half
                 
                 # Apply Boundary (Torus) - PRODUCTION: Use smooth wrapping
-                curr_x = smooth_boundary_wrap(curr_x, topology_id)
+                curr_x = apply_boundary_python(curr_x, topology_id)
                 
                 # 3. Kick (half step velocity at new pos)
                 res_half = self.christoffel(v_half, curr_x, force=force, **kwargs)
@@ -193,11 +196,20 @@ class LeapfrogIntegrator(nn.Module):
                         Wf = Wf[0]
                     if bf.dim() == 2:
                         bf = bf[0]
-                    feat = curr_x
-                    if topology_id == 1:
-                        feat = torch.cat([torch.sin(curr_x), torch.cos(curr_x)], dim=-1)
+                    
+                    # AUDIT FIX: Centralized boundary features
+                    feat = get_boundary_features(curr_x, topology_id)
+                    
                     gate = torch.matmul(feat, Wf.t()) + bf
-                    mu_half = torch.sigmoid(gate) * FRICTION_SCALE  # PRODUCTION: Use updated constant
+                    if Wi is not None:
+                        if Wi.dim() == 3:
+                            Wi = Wi[0]
+                        gate = gate + torch.matmul(force, Wi.t())
+                    mu_half = torch.sigmoid(gate) * FRICTION_SCALE
+                    if velocity_friction_scale > 0:
+                        v_norm = torch.norm(v_half, dim=-1, keepdim=True)
+                        v_norm = v_norm / (v_half.shape[-1] ** 0.5 + EPSILON_SMOOTH)
+                        mu_half = mu_half * (1.0 + velocity_friction_scale * v_norm)
                     
                 # PRODUCTION: Implicit Update with EPSILON_STANDARD=1e-7
                 curr_v = (v_half + h * (force - gamma_half)) / (1.0 + h * mu_half + EPSILON_STANDARD)

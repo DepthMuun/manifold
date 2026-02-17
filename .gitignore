@@ -26,6 +26,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 *.tex
+*.log
+*.pdf
 
 # PyTorch
 *.pth

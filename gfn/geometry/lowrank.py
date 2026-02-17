@@ -106,22 +106,26 @@ class LowRankChristoffel(nn.Module):
                      else:
                          x_in = x
 
-                     friction = torch.sigmoid(self.forget_gate(x_in)) * FRICTION_SCALE
+                     if self.friction > 0.0:
+                         friction = torch.sigmoid(self.forget_gate(x_in)) * FRICTION_SCALE
+                     else:
+                         friction = None
                      
                      # AUDIT FIX (2026-02-07): Velocity dependence with proper scaling
                      # Scale is now 0 by default to avoid excessive damping
-                     if self.velocity_friction_scale > 0:
+                     if friction is not None and self.velocity_friction_scale > 0:
                          velocity_magnitude = torch.norm(v, dim=-1, keepdim=True)
                          # Normalize by sqrt(dim) for dimension-invariant behavior
                          velocity_magnitude = velocity_magnitude / (self.dim ** 0.5 + 1e-8)
                          friction = friction * (1.0 + self.velocity_friction_scale * velocity_magnitude)
                      
-                     if getattr(self, 'return_friction_separately', False):
+                     if friction is not None and getattr(self, 'return_friction_separately', False):
                          # Apply symmetry normalization before returning (same as Python path)
                          gamma_cuda = self._normalize_christoffel_structure(gamma_cuda)
                          return gamma_cuda, friction
                          
-                     gamma_cuda = gamma_cuda + friction * v
+                     if friction is not None:
+                         gamma_cuda = gamma_cuda + friction * v
                 
                 # AUDIT FIX (2026-02-07): Apply same normalization as Python path
                 # This ensures consistent behavior between CUDA and CPU execution
@@ -134,16 +138,16 @@ class LowRankChristoffel(nn.Module):
         # PyTorch fallback with improved numerical stability
         if v.dim() == 3 and self.U.dim() == 3:
             proj = torch.bmm(v, self.U) 
-            norm = torch.norm(proj, dim=-1, keepdim=True)
-            # Double epsilon protection for division (unified with CUDA)
-            scale = 1.0 / (1.0 + norm + EPSILON_STRONG)
+            # PARITY FIX: Match CUDA energy normalization (||h||^2 / rank)
+            energy = torch.sum(proj * proj, dim=-1, keepdim=True) / max(1, proj.shape[-1])
+            scale = 1.0 / (1.0 + torch.sqrt(energy) + EPSILON_STRONG)
             sq = (proj * proj) * scale 
             gamma = torch.bmm(sq, self.W.transpose(1, 2)) 
         else:
             proj = torch.matmul(v, self.U)
-            norm = torch.norm(proj, dim=-1, keepdim=True)
-            # Double epsilon protection for division (unified with CUDA)
-            scale = 1.0 / (1.0 + norm + EPSILON_STRONG)
+            # PARITY FIX: Match CUDA energy normalization (||h||^2 / rank)
+            energy = torch.sum(proj * proj, dim=-1, keepdim=True) / max(1, proj.shape[-1])
+            scale = 1.0 / (1.0 + torch.sqrt(energy) + EPSILON_STRONG)
             sq = (proj * proj) * scale
             gamma = torch.matmul(sq, self.W.t())
             
@@ -152,6 +156,10 @@ class LowRankChristoffel(nn.Module):
                  x_in = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
             else:
                  x_in = x
+            
+            if self.friction <= 0.0:
+                gamma = self._normalize_christoffel_structure(gamma)
+                return CURVATURE_CLAMP * torch.tanh(gamma / CURVATURE_CLAMP)
                  
             Wf = kwargs.get('W_forget_stack', None)
             Wi = kwargs.get('W_input_stack', None)

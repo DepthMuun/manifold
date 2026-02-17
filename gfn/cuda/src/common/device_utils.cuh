@@ -3,6 +3,7 @@
 
 #include "types.cuh"
 #include <cuda_runtime.h>
+#include <cmath>
 
 namespace gfn {
 namespace cuda {
@@ -13,12 +14,16 @@ namespace cuda {
 
 /**
  * Apply periodic boundary conditions for toroidal topology.
- * Maps coordinates to [-π, π] range.
+ * Maps coordinates to [0, 2π) range using smooth wrapping.
  */
-GFN_DEVICE scalar_t apply_boundary_device(scalar_t x, Topology topology) {
+template <typename T>
+GFN_DEVICE T apply_boundary_device(T x, Topology topology) {
     if (topology == Topology::TORUS) {
-        scalar_t wrapped = atan2f(sinf(x), cosf(x));
-        return wrapped < 0.0f ? wrapped + TWO_PI : wrapped;
+        T wrapped = atan2(sin(x), cos(x));
+        if (wrapped < static_cast<T>(0)) {
+            wrapped += static_cast<T>(TWO_PI<T>);
+        }
+        return wrapped;
     }
     return x;
 }
@@ -26,14 +31,15 @@ GFN_DEVICE scalar_t apply_boundary_device(scalar_t x, Topology topology) {
 /**
  * Apply boundary conditions to entire vector.
  */
+template <typename T>
 GFN_DEVICE void apply_boundary_vector(
-    scalar_t* x,
+    T* x,
     int dim,
     Topology topology
 ) {
     if (topology == Topology::TORUS) {
         for (int i = 0; i < dim; ++i) {
-            x[i] = apply_boundary_device(x[i], topology);
+            x[i] = apply_boundary_device<T>(x[i], topology);
         }
     }
 }
@@ -45,10 +51,11 @@ GFN_DEVICE void apply_boundary_vector(
 /**
  * Safe division with epsilon protection.
  */
-GFN_DEVICE scalar_t safe_divide(
-    scalar_t numerator,
-    scalar_t denominator,
-    scalar_t epsilon = EPSILON_STRONG
+template <typename T>
+GFN_DEVICE T safe_divide(
+    T numerator,
+    T denominator,
+    T epsilon = static_cast<T>(EPSILON_STRONG<T>)
 ) {
     return numerator / (denominator + epsilon);
 }
@@ -56,10 +63,11 @@ GFN_DEVICE scalar_t safe_divide(
 /**
  * Clamp value to range with configurable limits.
  */
-GFN_DEVICE scalar_t clamp_value(
-    scalar_t value,
-    scalar_t min_val = CURVATURE_CLAMP_MIN,
-    scalar_t max_val = CURVATURE_CLAMP
+template <typename T>
+GFN_DEVICE T clamp_value(
+    T value,
+    T min_val = static_cast<T>(CURVATURE_CLAMP_MIN<T>),
+    T max_val = static_cast<T>(CURVATURE_CLAMP<T>)
 ) {
     return fmin(fmax(value, min_val), max_val);
 }
@@ -67,9 +75,10 @@ GFN_DEVICE scalar_t clamp_value(
 /**
  * Soft clamp using tanh.
  */
-GFN_DEVICE scalar_t soft_clamp(
-    scalar_t value,
-    scalar_t scale = CURVATURE_CLAMP
+template <typename T>
+GFN_DEVICE T soft_clamp(
+    T value,
+    T scale = static_cast<T>(CURVATURE_CLAMP<T>)
 ) {
     return scale * tanh(value / scale);
 }
@@ -81,12 +90,13 @@ GFN_DEVICE scalar_t soft_clamp(
 /**
  * Dot product of two vectors.
  */
-GFN_DEVICE scalar_t dot_product(
-    const scalar_t* a,
-    const scalar_t* b,
+template <typename T>
+GFN_DEVICE T dot_product(
+    const T* a,
+    const T* b,
     int dim
 ) {
-    scalar_t result = 0.0f;
+    T result = static_cast<T>(0);
     for (int i = 0; i < dim; ++i) {
         result += a[i] * b[i];
     }
@@ -99,18 +109,20 @@ GFN_DEVICE scalar_t dot_product(
  * @param dim Dimension of vector
  * @return ||v||_2
  */
-GFN_DEVICE scalar_t norm(const scalar_t* v, int dim) {
+template <typename T>
+GFN_DEVICE T norm(const T* v, int dim) {
     // AUDIT FIX: Use EPSILON_STANDARD for CUDA/Python parity (was EPSILON_WEAK)
-    return sqrt(dot_product(v, v, dim) + EPSILON_STANDARD);
+    return sqrt(dot_product<T>(v, v, dim) + static_cast<T>(EPSILON_STANDARD<T>));
 }
 
 /**
  * Vector addition: c = a + b
  */
+template <typename T>
 GFN_DEVICE void vector_add(
-    scalar_t* c,
-    const scalar_t* a,
-    const scalar_t* b,
+    T* c,
+    const T* a,
+    const T* b,
     int dim
 ) {
     for (int i = 0; i < dim; ++i) {
@@ -121,11 +133,12 @@ GFN_DEVICE void vector_add(
 /**
  * Scaled vector addition: c = a + scale * b
  */
+template <typename T>
 GFN_DEVICE void vector_add_scaled(
-    scalar_t* c,
-    const scalar_t* a,
-    scalar_t scale,
-    const scalar_t* b,
+    T* c,
+    const T* a,
+    T scale,
+    const T* b,
     int dim
 ) {
     for (int i = 0; i < dim; ++i) {
@@ -136,10 +149,11 @@ GFN_DEVICE void vector_add_scaled(
 /**
  * Vector scaling: b = scale * a
  */
+template <typename T>
 GFN_DEVICE void vector_scale(
-    scalar_t* b,
-    scalar_t scale,
-    const scalar_t* a,
+    T* b,
+    T scale,
+    const T* a,
     int dim
 ) {
     for (int i = 0; i < dim; ++i) {
@@ -150,9 +164,10 @@ GFN_DEVICE void vector_scale(
 /**
  * Copy vector: dst = src
  */
+template <typename T>
 GFN_DEVICE void vector_copy(
-    scalar_t* dst,
-    const scalar_t* src,
+    T* dst,
+    const T* src,
     int dim
 ) {
     for (int i = 0; i < dim; ++i) {
@@ -163,12 +178,13 @@ GFN_DEVICE void vector_copy(
 /**
  * Zero vector: v = 0
  */
+template <typename T>
 GFN_DEVICE void vector_zero(
-    scalar_t* v,
+    T* v,
     int dim
 ) {
     for (int i = 0; i < dim; ++i) {
-        v[i] = 0.0f;
+        v[i] = static_cast<T>(0);
     }
 }
 
@@ -179,14 +195,16 @@ GFN_DEVICE void vector_zero(
 /**
  * Sigmoid activation.
  */
-GFN_DEVICE scalar_t sigmoid(scalar_t x) {
-    return 1.0 / (1.0 + exp(-x));
+template <typename T>
+GFN_DEVICE T sigmoid(T x) {
+    return static_cast<T>(1) / (static_cast<T>(1) + exp(-x));
 }
 
 /**
  * Tanh activation (already in CUDA, but for consistency).
  */
-GFN_DEVICE scalar_t tanh_activation(scalar_t x) {
+template <typename T>
+GFN_DEVICE T tanh_activation(T x) {
     return tanh(x);
 }
 
@@ -197,9 +215,10 @@ GFN_DEVICE scalar_t tanh_activation(scalar_t x) {
 /**
  * Warp-level reduction sum.
  */
-GFN_DEVICE scalar_t warp_reduce_sum(scalar_t val) {
+template <typename T>
+GFN_DEVICE T warp_reduce_sum(T val) {
     #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val += __shfl_down_sync(0xffffffff, val, offset);
     }
     return val;
@@ -208,19 +227,20 @@ GFN_DEVICE scalar_t warp_reduce_sum(scalar_t val) {
 /**
  * Block-level reduction sum.
  */
-GFN_DEVICE scalar_t block_reduce_sum(scalar_t val) {
-    __shared__ scalar_t shared[WARP_SIZE];
+template <typename T>
+GFN_DEVICE T block_reduce_sum(T val) {
+    __shared__ T shared[32];
     
-    int lane = threadIdx.x % WARP_SIZE;
-    int wid = threadIdx.x / WARP_SIZE;
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
     
-    val = warp_reduce_sum(val);
+    val = warp_reduce_sum<T>(val);
     
     if (lane == 0) shared[wid] = val;
     __syncthreads();
     
-    val = (threadIdx.x < blockDim.x / WARP_SIZE) ? shared[lane] : 0.0f;
-    if (wid == 0) val = warp_reduce_sum(val);
+    val = (threadIdx.x < blockDim.x / warpSize) ? shared[lane] : static_cast<T>(0);
+    if (wid == 0) val = warp_reduce_sum<T>(val);
     
     return val;
 }

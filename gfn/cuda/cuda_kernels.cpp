@@ -53,6 +53,7 @@ std::vector<torch::Tensor> leapfrog_fused(
     float dt, float dt_scale, int steps, int topology,
     torch::Tensor W_forget, torch::Tensor b_forget,
     torch::Tensor W_input,
+    torch::Tensor V_w, // Singularity vector
     float plasticity, float sing_thresh, float sing_strength, float R, float r,
     float velocity_friction_scale,
     torch::Tensor hysteresis_state,
@@ -89,11 +90,30 @@ std::vector<torch::Tensor> toroidal_leapfrog_fused(
     torch::Tensor W_forget, torch::Tensor b_forget
 );
 
+namespace gfn { namespace cuda {
+std::vector<torch::Tensor> unified_mlayer_fused_cuda(
+    torch::Tensor x, torch::Tensor v, torch::Tensor forces,
+    torch::Tensor U_stack, torch::Tensor W_stack,
+    torch::Tensor W_forget, torch::Tensor b_forget, torch::Tensor W_input,
+    torch::Tensor V_w,
+    float dt, torch::Tensor dt_scales, int topology,
+    float plasticity, float sing_thresh, float sing_strength, float R, float r,
+    float velocity_friction_scale,
+    float thermo_alpha, float thermo_temp,
+    torch::Tensor holo_z, torch::Tensor holo_grad_z,
+    torch::Tensor hysteresis_state,
+    torch::Tensor hyst_update_w, torch::Tensor hyst_update_b,
+    torch::Tensor hyst_readout_w, torch::Tensor hyst_readout_b,
+    float hyst_decay, bool hyst_enabled
+);
+} }
+
 std::vector<torch::Tensor> leapfrog_backward_cuda(
     torch::Tensor grad_x_out, torch::Tensor grad_v_out,
     torch::Tensor x_in, torch::Tensor v_in, torch::Tensor force,
     torch::Tensor U, torch::Tensor W, torch::Tensor W_forget, torch::Tensor b_forget,
     torch::Tensor W_input, // Added
+    torch::Tensor V_w, // Added
     float dt, float dt_scale, int steps, int topology,
     float plasticity, float sing_thresh, float sing_strength, float R, float r,
     float velocity_friction_scale, // Added
@@ -114,11 +134,8 @@ std::vector<torch::Tensor> heun_backward_cuda(
     float R, float r
 );
 
-std::vector<torch::Tensor> recurrent_manifold_fused(
-    torch::Tensor x, torch::Tensor v, torch::Tensor forces,
-    torch::Tensor U_stack, torch::Tensor W_stack,
-    double dt, double dt_scale, int64_t num_heads
-);
+// Stale recurrent_manifold_fused removed in favor of unified_mlayer_fused_cuda
+
 
 torch::Tensor dynamic_gating_fused(
     torch::Tensor x,
@@ -177,6 +194,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("dt"), py::arg("dt_scale"), py::arg("steps"), py::arg("topology"),
           py::arg("W_forget"), py::arg("b_forget"),
           py::arg("W_input"),
+          py::arg("V_w"), // Singularity vector
           py::arg("plasticity"), py::arg("sing_thresh"), py::arg("sing_strength"), py::arg("R"), py::arg("r"),
           py::arg("velocity_friction_scale"),
           
@@ -219,6 +237,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("x_in"), py::arg("v_in"), py::arg("force"),
           py::arg("U"), py::arg("W"), py::arg("W_forget"), py::arg("b_forget"),
           py::arg("W_input"), // Added
+          py::arg("V_w"), // Added
           py::arg("dt"), py::arg("dt_scale"), py::arg("steps"), py::arg("topology"),
           py::arg("plasticity"), py::arg("sing_thresh"), py::arg("sing_strength"), py::arg("R"), py::arg("r"),
           py::arg("velocity_friction_scale"), // Added
@@ -239,11 +258,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("dt"), py::arg("dt_scale"), py::arg("steps"), py::arg("topology"),
           py::arg("R"), py::arg("r"));
 
-    m.def("recurrent_manifold_fused", &recurrent_manifold_fused,
-          "Recurrent manifold fused sequence step (CUDA)",
+    m.def("unified_mlayer_fused", &gfn::cuda::unified_mlayer_fused_cuda,
+          "Unified MLayer fused sequence step (CUDA)",
           py::arg("x"), py::arg("v"), py::arg("forces"),
           py::arg("U_stack"), py::arg("W_stack"),
-          py::arg("dt"), py::arg("dt_scale"), py::arg("num_heads"));
+          py::arg("W_forget"), py::arg("b_forget"), py::arg("W_input"),
+          py::arg("V_w"),
+          py::arg("dt"), py::arg("dt_scales"), py::arg("topology"),
+          py::arg("plasticity"), py::arg("sing_thresh"), py::arg("sing_strength"),
+          py::arg("R"), py::arg("r"), py::arg("velocity_friction_scale"),
+          py::arg("thermo_alpha"), py::arg("thermo_temp"),
+          py::arg("holographic_z"), py::arg("holographic_grad_z"),
+          py::arg("hysteresis_state"),
+          py::arg("hyst_update_w"), py::arg("hyst_update_b"),
+          py::arg("hyst_readout_w"), py::arg("hyst_readout_b"),
+          py::arg("hyst_decay"), py::arg("hyst_enabled"));
+
 
     m.def("dynamic_gating_fused", &dynamic_gating_fused,
           "Dynamic gating MLP (CUDA)",
