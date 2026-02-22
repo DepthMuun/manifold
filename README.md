@@ -1,3 +1,6 @@
+## This v2.6.6 push doesn’t reflect the current state of the project. It’s an old snapshot that was uploaded just as a reference. The full version will be pushed soon.
+
+
 # THIS IS A PROJECT IN DEVELOPMENT, WE DO NOT RECOMMEND USING IT FOR PRODUCTION YET.
 
 # Manifold: Geometric Sequence Modeling via Symplectic Flows
