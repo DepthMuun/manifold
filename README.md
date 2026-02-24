@@ -1,3 +1,14 @@
+# ⚠️ ORGANIZATION RENAMED ⚠️  
+**Previously: Manifold-Laboratory**
+
+**Now: DepthMuun**  
+
+All old links (including github.com/Manifold-Laboratory/manifold) redirect automatically.  
+Same repo, same code, same project —just better branding for our vision.  
+
+**Thanks for your support!** :)
+
+
 # Progress Update (February 21, 2026)
 
 Over the past two weeks, we’ve been working intensively on the Geodesic Flow Framework (GFN / Manifold). Here’s a quick update on where things stand:
