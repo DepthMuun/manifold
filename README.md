@@ -3,7 +3,7 @@
 
 **Now: DepthMuun**  
 
-All old links (including github.com/Manifold-Laboratory/manifold) redirect automatically.  
+All old links (including github.com/Manifold-Laboratory/manifold) NOT redirect automatically.  
 Same repo, same code, same project —just better branding for our vision.  
 
 **Thanks for your support!** :)
