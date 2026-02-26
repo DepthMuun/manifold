@@ -4,7 +4,7 @@
 
 Before: **manifold**
 
-Now: **Geodesic Flow Network**
+Now: **Geodesic Flow Framework**
 
 
 # ORGANIZATION: 
