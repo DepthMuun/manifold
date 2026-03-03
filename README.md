@@ -235,46 +235,9 @@ Manifold provides a production-ready implementation with a PyTorch-native API.
 ```bash
 pip install gfn
 # OR for development
-git clone https://github.com/Manifold-Laboratory/manifold.git
+git clone https://github.com/DepthMuun/gfn.git
 cd manifold
 pip install -e "."
-```
-
-### 7.2. Geodesic Training Loop
-
-The optimizer must respect the geometry of the parameter space. Standard Adam optimization assumes a Euclidean flat space, which is suboptimal for Riemannian models. We provide `RiemannianAdam` to perform covariant gradient updates.
-
-```python
-import torch
-from gfn.model import Manifold
-from gfn.optim import RiemannianAdam
-
-# Initialize the Geometric Engine
-model = Manifold(
-    vocab_size=50257,
-    dim=512,
-    depth=12,
-    heads=8,
-    integrator_type='leapfrog'  # Symplectic Solver
-).cuda()
-
-# Optimizer: RiemannianAdam is required for manifold constraints
-optimizer = RiemannianAdam(model.parameters(), lr=1e-4, max_norm=10.0)
-
-# Training with symplectic conservation
-model.train()
-for input_ids, targets in dataloader:
-    optimizer.zero_grad()
-    
-    # Forward pass: Evolve state along geodesics
-    logits, (x_final, v_final), _ = model(input_ids)
-    
-    loss = torch.nn.functional.cross_entropy(logits.view(-1, 50257), targets.view(-1))
-    loss.backward()
-    
-    # Gradient clipping is essential for differential stability around singularities
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05)
-    optimizer.step()
 ```
 
 ---
@@ -284,8 +247,8 @@ for input_ids, targets in dataloader:
 Manifold is an active research project. If you utilize this framework or its findings in your research, please cite:
 
 ```bibtex
-@article{sturtz2026manifold,
-  title={Manifold: Geometric Sequence Modeling via Symplectic Flows},
+@article{Geodesic Flow network,
+  title={Geodesic Flow Networks},
   author={Stürtz, Joaquín},
   journal={arXiv preprint},
   year={2026}
@@ -296,5 +259,5 @@ Manifold is an active research project. If you utilize this framework or its fin
 
 <div align="center">
   <b>Joaquín Stürtz</b><br>
-  <i>Manifold Laboratory</i>
+  <i>DepthMuun</i>
 </div>
