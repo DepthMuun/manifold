@@ -26,7 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from gfn import Manifold, GFNLoss, RiemannianAdam, GPUMonitor
 from gfn.losses import hamiltonian_loss, curiosity_loss, geodesic_regularization, ToroidalDistanceLoss
-from gfn.datasets import MathDataset, MixedHFDataset
+from gfn.data import MathDataset
 
 
 
@@ -222,7 +222,7 @@ def train(model_cfg: dict, train_cfg: dict, hw_cfg: dict):
                 
                 # COMPONENT 5: Compute toroidal distance loss on manifold positions
                 # pred_positions are the ACTUAL manifold coordinates, not readout logits
-                from gfn.geometry.boundaries import toroidal_dist_python
+                from gfn.utils.safety import toroidal_dist_python
                 dist = toroidal_dist_python(pred_positions, targ_valid)
                 loss_torus = (dist.pow(2) * mask_exp).sum() / torch.clamp(mask_exp.sum() * targ_valid.size(-1), min=1.0)
                 total_loss = loss_torus

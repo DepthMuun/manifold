@@ -1,33 +1,30 @@
 """
-Utilities
-=========
-
-Utility functions for GFN.
-
-Available Utilities:
-    - parallel_scan: Parallel scan implementation
-    - GPUMonitor: GPU temperature monitoring
+gfn/utils/__init__.py
+Public API del módulo utils — GFN V5
 """
 
-from .scan import parallel_scan
-from .safety import GPUMonitor
+from gfn.utils.tensor import (
+    flatten_heads,
+    unflatten_heads,
+    merge_batch_heads,
+    split_batch_heads,
+    causal_mask,
+    shift_right,
+    masked_mean,
+    nan_to_num,
+    count_parameters,
+)
+from gfn.utils.coords import (
+    box_to_torus,
+    torus_to_box,
+    wrap_angles,
+    angle_to_unit,
+)
 
-# Visualization functions (if they exist)
-try:
-    from .visualization import (
-        visualize_manifold_flow,
-        visualize_christoffel_field,
-        visualize_geodesic_paths,
-    )
-    __all__ = [
-        'parallel_scan',
-        'GPUMonitor',
-        'visualize_manifold_flow',
-        'visualize_christoffel_field',
-        'visualize_geodesic_paths',
-    ]
-except ImportError:
-    __all__ = [
-        'parallel_scan',
-        'GPUMonitor',
-    ]
+__all__ = [
+    # Tensor
+    "flatten_heads", "unflatten_heads", "merge_batch_heads", "split_batch_heads",
+    "causal_mask", "shift_right", "masked_mean", "nan_to_num", "count_parameters",
+    # Coords
+    "box_to_torus", "torus_to_box", "wrap_angles", "angle_to_unit",
+]

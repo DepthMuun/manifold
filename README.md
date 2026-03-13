@@ -1,6 +1,3 @@
-## This v2.6.6 push doesn’t reflect the current state of the project. It’s an old snapshot that was uploaded just as a reference. The full version will be pushed soon.
-
-
 # THIS IS A PROJECT IN DEVELOPMENT, WE DO NOT RECOMMEND USING IT FOR PRODUCTION YET.
 
 # Manifold: Geometric Sequence Modeling via Symplectic Flows
@@ -8,9 +5,9 @@
 > **Infinite Context. Constant Memory. Hamiltonian Dynamics.**
 
 <p align="center">
-  <img src="tests/benchmarks/results/geodesic_flow/geodesic_flow_3d.png" alt="Latent Geodesic Trajectories" width="100%"/>
+  <img src="tests/results/visualizers/torus_3D.png" alt="Latent Geodesic Trajectories" width="100%"/>
   <br>
-  <i><b>Figure 1: The Geometry of Thought.</b> Visualization of the semantic state evolution ($x_t, v_t$) traversing a learned high-dimensional Riemannian manifold. Unlike discrete state transitions in traditional RNNs, Manifold models intelligence as a continuous symplectic flow, conserving momentum and information over infinite horizons.</i>
+  <i><b>Figure 1: The Geometry of Thought.</b> Visualization of the semantic state evolution ($x_t, v_t$) traversing a learned high-dimensional Riemannian manifold (n-Torus topology). Unlike discrete state transitions in traditional RNNs, GFN models intelligence as a continuous symplectic flow, conserving momentum and information over infinite horizons.</i>
 </p>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -48,18 +45,18 @@ Manifold provides comprehensive documentation to help users understand, implemen
 ### Documentation Map
 
 ```
-├── Getting Started
-│   ├── Installation & Setup
-│   └── Quick Start Tutorial
-│
-├── Core Concepts
-│   ├── Mathematical Foundations
-│   └── Architecture Deep Dive
-│
-├── Reference
-│   ├── API Documentation
-│   ├── Benchmarking Results
-│   └── Troubleshooting Guide
+â”œâ”€â”€ Getting Started
+â”‚   â”œâ”€â”€ Installation & Setup
+â”‚   â””â”€â”€ Quick Start Tutorial
+â”‚
+â”œâ”€â”€ Core Concepts
+â”‚   â”œâ”€â”€ Mathematical Foundations
+â”‚   â””â”€â”€ Architecture Deep Dive
+â”‚
+â”œâ”€â”€ Reference
+â”‚   â”œâ”€â”€ API Documentation
+â”‚   â”œâ”€â”€ Benchmarking Results
+â”‚   â””â”€â”€ Troubleshooting Guide
 ```
 
 ---
@@ -67,6 +64,12 @@ Manifold provides comprehensive documentation to help users understand, implemen
 ## 1. Introduction: The Memory Bottleneck
 
 The fundamental limitation of modern Large Language Models (LLMs) is the **Key-Value (KV) Cache**. To generate the next token, a Transformer must explicitly attend to its entire history. This results in a memory complexity of $O(N)$, creating a hard physical ceiling on context length and inference throughput.
+
+<p align="center">
+  <img src="tests/results/visualizers/attention_vs_flow.png" alt="Attention vs Flow" width="100%"/>
+  <br>
+  <i><b>The Differentiator.</b> Side-by-side comparison between statistical attention (N² complexity) and Geometric Flow (O(1) complexity).</i>
+</p>
 
 **Manifold** introduces a paradigm shift by reformulating sequence modeling through the lens of **Geometric Mechanics**. Instead of storing a history of discrete tokens, Manifold encodes context into the **momentum** of a dynamic massive particle moving through a curved semantic space.
 
@@ -88,9 +91,9 @@ We compared **Manifold (v2.6.0)** against a standard **Transformer (MicroGPT)** 
 Both models were trained **exclusively** on sequences of length $L=20$. We then evaluated their ability to generalize to sequences up to $L=100,000$ (5,000x longer than training).
 
 <p align="center">
-  <img src="tests/benchmarks/results/gfn_superiority/parity_result.png" alt="Superiority Benchmark Result" width="100%"/>
+  <img src="tests/results/visualizers/kv_cache_wall.png" alt="Memory Complexity Proof" width="100%"/>
   <br>
-  <i><b>Figure 2: The Generalization Gap.</b> (Left) Accuracy on Cumulative Parity task relative to sequence length. (Right) VRAM usage scaling. Manifold generalizes perfectly to 100,000+ tokens (~5000x training length) while maintaining O(1) memory.</i>
+  <i><b>Figure 2: Escaping the Memory Wall.</b> Comparison of peak VRAM usage. While Transformers hit a physical ceiling at long horizons due to KV-cache growth, GFN maintains a constant footprint, enabling infinite context processing on commodity hardware.</i>
 </p>
 
 ### 2.2. Vocabulary Scaling (O(1) Parameters)
@@ -98,9 +101,9 @@ Both models were trained **exclusively** on sequences of length $L=20$. We then 
 Manifold's **Functional Embeddings** allow the vocabulary to grow indefinitely without increasing parameter count.
 
 <p align="center">
-  <img src="tests/benchmarks/results/infinite_scaling/infinite_scaling_plot.png" alt="Infinite Vocab Scaling" width="100%"/>
+  <img src="tests/results/visualizers/semantic_clusters.png" alt="Ontological Clustering" width="100%"/>
   <br>
-  <i><b>Figure 3: Infinite Vocabulary.</b> Proving O(1) memory scaling with respect to vocabulary size (up to 1 Million tokens).</i>
+  <i><b>Figure 3: Ontological Grounding.</b> Visualization of how different categories of entities (Numbers, Operators, Entities) are organized geometrically in the latent space. Logic emerges from the geometric relationships between these clusters.</i>
 </p>
 
 **Empirical Conclusion**: Manifold demonstrates true **algorithmic generalization**. It has learned the underlying generative law of the data (the XOR operator) rather than simply memorizing patterns. This capability is enabled by its **momentum-based memory**, which acts as a robust, noise-resistant carrier of logical state.
@@ -117,9 +120,9 @@ Standard RNNs struggle to forget ("catastrophic memory"), while Transformers mus
 *   **Context Switch:** Friction spikes (Energy Dissipation). The model forgets.
 
 <p align="center">
-  <img src="tests/benchmarks/results/stability/dynamic_friction_test.png" alt="Dynamic Friction Response" width="100%"/>
+  <img src="tests/results/visualizers/energy_landscape.png" alt="Energy Landscape" width="100%"/>
   <br>
-  <i><b>Figure 3: The Physics of Forgetting.</b> (Left) When a high-energy "Context Switch" occurs (Blue), the Learnable Friction (Red) spikes immediately to dissipate previous state momentum. (Right) The learned activation function shows a clear phase transition from conservation to dissipation based on input magnitude.</i>
+  <i><b>Figure 4: The Physics of Information.</b> Vector field analysis of the manifold. Force gradients guide the state towards semantic attractors (Potential Wells), while singularities handle context-switching and logical branches.</i>
 </p>
 
 ---
@@ -142,14 +145,20 @@ Where:
 *   $\Gamma(x)$: The **Christoffel Symbols** (Learned Interaction Tensor), defining the local curvature and feature interactions ($O(d^2)$ complexity).
 *   $F(u_t)$: The **External Force** derived from the input token embedding.
 
+<p align="center">
+  <img src="tests/results/visualizers/logic_as_physics.png" alt="Logic as Physics" width="80%"/>
+  <br>
+  <i><b>Reasoning as Collision.</b> In this framework, solving a logic problem (e.g., 2 + 3) is modeled as a physical intersection of entities. The result is the state that satisfies the conservation laws of the world.</i>
+</p>
+
 ### 4.2. Symplectic Stability & Conservation
 
 Standard Euler integration used in Residual Networks is energy-dissipative, leading to signal loss. Manifold employs a **Leapfrog Integrator**, a symplectic solver designed to strictly conserve phase-space volume.
 
 <p align="center">
-  <img src="tests/benchmarks/results/stability/stability_metrics_20260119_022614.png" alt="Symplectic Stability Metrics" width="100%"/>
+  <img src="tests/results/visualizers/holographic_interference.png" alt="Holographic Interference" width="100%"/>
   <br>
-  <i><b>Figure 3: Conservation Laws.</b> Analysis of the Hamiltonian energy drift over long horizons. Unlike standard integration which diverges (Green), Manifold's symplectic solver (Blue) keeps energy bounded, ensuring gradient stability for $L \to \infty$.</i>
+  <i><b>Figure 5: Phase Coherence.</b> Visualizing multi-head force interactions as holographic interference patterns. Information synthesis occurs through constructive interference between attractor waves.</i>
 </p>
 
 ---
@@ -163,9 +172,9 @@ We perform a deep diagnostic of the model's internal representation to understan
 By projecting the high-dimensional hidden states into 3D, we observe that Manifold learns smooth, deterministic orbits, whereas traditional RNNs often exhibit chaotic or collapsing trajectories.
 
 <p align="center">
-  <img src="tests/benchmarks/results/trajectories/trajectory_comparison.png" alt="Trajectory Comparison" width="100%"/>
+  <img src="tests/results/visualizers/state_trajectories.png" alt="Latent Trajectories" width="100%"/>
   <br>
-  <i><b>Figure 4: Latent Dynamics Comparison.</b> Left: The chaotic state evolution of a standard RNN. Right: The coherent, orbital structure of a Manifold trained on the same task. The geometric prior forces the state to follow smooth geodesic paths.</i>
+  <i><b>Figure 6: Manifold Flow Lines.</b> Visualization of the smooth, deterministic geodesics followed by the state vector. The geometric prior ensures that state evolution remains bounded and logically consistent over time.</i>
 </p>
 
 ### 5.2. The Geometry of Optimization
@@ -173,9 +182,9 @@ By projecting the high-dimensional hidden states into 3D, we observe that Manifo
 Why does Manifold converge faster on complex tasks? The answer lies in the Loss Landscape. By constraining parameters to the manifold, we convexify the optimization surface.
 
 <p align="center">
-  <img src="tests/benchmarks/results/loss_landscape/loss_landscape_3d_comparison.png" alt="Loss Landscape 3D" width="100%"/>
+  <img src="tests/results/visualizers/landscape_3D.png" alt="3D Potential Surface" width="100%"/>
   <br>
-  <i><b>Figure 5: Optimization Topography.</b> (Left) The sharp, non-convex landscape of a standard Transformer trained on Parity. (Right) The smooth, quasi-convex basin of Manifold, enabled by RiemannianAdam and geometric regularization.</i>
+  <i><b>Figure 7: Topography of Logic.</b> 3D rendering of the potential energy manifold. The "valleys" represent stable semantic states where the model's logic is grounded.</i>
 </p>
 
 ---
@@ -185,9 +194,9 @@ Why does Manifold converge faster on complex tasks? The answer lies in the Loss 
 The geometric framework is domain-agnostic. By projecting inputs into the tangent space of the manifold, the model processes text, images, and audio as unified force vectors. Current experiments demonstrate convergence in multimodal tasks, suggesting that geometric mechanics is a universal prior for sequential data.
 
 <p align="center">
-  <img src="tests/benchmarks/results/fractals/fractal_zoom_comparison.png" alt="Fractal Dynamics" width="100%"/>
+  <img src="tests/results/visualizers/torus_wrapping.png" alt="Torus Wrapping" width="80%"/>
   <br>
-  <i><b>Figure 6: Fractal State Space.</b> Investigating the self-similar properties of the learned manifold. The model learns to organize information hierarchically, exhibiting fractal structures in its decision boundaries.</i>
+  <i><b>Figure 8: Periodic Continuity.</b> Unwrapping the n-Torus manifold into a 2D periodic grid. This topology allows for infinite recurrence without state collapse.</i>
 </p>
 
 ---
@@ -201,46 +210,9 @@ Manifold provides a production-ready implementation with a PyTorch-native API.
 ```bash
 pip install gfn
 # OR for development
-git clone https://github.com/Manifold-Laboratory/manifold.git
+git clone https://github.com/DepthMuun/gfn.git
 cd manifold
 pip install -e "."
-```
-
-### 7.2. Geodesic Training Loop
-
-The optimizer must respect the geometry of the parameter space. Standard Adam optimization assumes a Euclidean flat space, which is suboptimal for Riemannian models. We provide `RiemannianAdam` to perform covariant gradient updates.
-
-```python
-import torch
-from gfn.model import Manifold
-from gfn.optim import RiemannianAdam
-
-# Initialize the Geometric Engine
-model = Manifold(
-    vocab_size=50257,
-    dim=512,
-    depth=12,
-    heads=8,
-    integrator_type='leapfrog'  # Symplectic Solver
-).cuda()
-
-# Optimizer: RiemannianAdam is required for manifold constraints
-optimizer = RiemannianAdam(model.parameters(), lr=1e-4, max_norm=10.0)
-
-# Training with symplectic conservation
-model.train()
-for input_ids, targets in dataloader:
-    optimizer.zero_grad()
-    
-    # Forward pass: Evolve state along geodesics
-    logits, (x_final, v_final), _ = model(input_ids)
-    
-    loss = torch.nn.functional.cross_entropy(logits.view(-1, 50257), targets.view(-1))
-    loss.backward()
-    
-    # Gradient clipping is essential for differential stability around singularities
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05)
-    optimizer.step()
 ```
 
 ---
@@ -250,10 +222,10 @@ for input_ids, targets in dataloader:
 Manifold is an active research project. If you utilize this framework or its findings in your research, please cite:
 
 ```bibtex
-@article{sturtz2026manifold,
-  title={Manifold: Geometric Sequence Modeling via Symplectic Flows},
+@article{sturtz2026geodesic,
+  title={{Geodesic Flow Networks: Geometric Sequence Modeling via Symplectic Flows}},
   author={Stürtz, Joaquín},
-  journal={arXiv preprint},
+  journal={arXiv preprint arXiv:26XX.XXXXX},
   year={2026}
 }
 ```
@@ -262,5 +234,5 @@ Manifold is an active research project. If you utilize this framework or its fin
 
 <div align="center">
   <b>Joaquín Stürtz</b><br>
-  <i>Manifold Laboratory</i>
+  <i>DepthMuun</i>
 </div>

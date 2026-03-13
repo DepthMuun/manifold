@@ -1,15 +1,15 @@
-cff-version: 1.2.0
+﻿cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 authors:
-  - family-names: "Stürtz"
-    given-names: "Joaquín"
-    affiliation: "Manifold Laboratory"
+  - family-names: "StÃ¼rtz"
+    given-names: "JoaquÃ­n"
+    affiliation: "DepthMuun"
 title: "Manifold: Geometric Sequence Modeling via Symplectic Flows"
 version: "2.6.5"
 doi: ""
 date-released: 2026-02-03
-url: "https://github.com/Manifold-Laboratory/manifold"
-repository-code: "https://github.com/Manifold-Laboratory/manifold"
+url: "https://github.com/DepthMuun/gfn"
+repository-code: "https://github.com/DepthMuun/gfn"
 license: Apache-2.0
 type: software
 keywords:

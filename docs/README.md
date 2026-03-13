@@ -1,49 +1,58 @@
-# MANIFOLD Documentation
+# Manifold Documentation
 
-Welcome to the MANIFOLD documentation. This directory contains comprehensive technical reference and research materials for the MANIFOLD (Multi-scale Adaptive Neural Inference via Flow On Learned Dynamics) architecture.
+Welcome to the Manifold documentation. Manifold is a Geometric Flow Network (GFN) implementation that reformulates sequence modeling through the lens of differential geometry and Hamiltonian mechanics. This documentation provides comprehensive guidance for understanding, configuring, and using the Manifold framework.
 
-## 📚 Core Documentation
+## Documentation Structure
 
-### Technical Reference
-- **[SCIENTIFIC_PAPER.md](SCIENTIFIC_PAPER.md)** - Complete research paper with mathematical derivations, experimental validation, and reproducibility details
-- **[TECHNICAL_HANDBOOK.md](TECHNICAL_HANDBOOK.md)** - **The "Source of Truth"**: Fundamental equations, loss engine details, and optimization protocols.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture overview and design principles
-- **[API.md](API.md)** - Python API reference for model usage
-- **[TRAINING.md](TRAINING.md)** - Training procedures, hyperparameters, and optimization guides
-- **[BENCHMARKS.md](BENCHMARKS.md)** - Empirical performance benchmarks and comparisons
+### Getting Started
 
-### Theoretical Foundations
-- **[PHYSICS.md](PHYSICS.md)** - Mathematical foundations: Riemannian geometry, symplectic integration, Hamiltonian mechanics
-- **[CONCEPTS.md](CONCEPTS.md)** - Key concepts: geodesic flow, Christoffel symbols, manifold learning
-- **[MODELS_AND_MECHANICS.md](MODELS_AND_MECHANICS.md)** - Detailed mechanical explanations of core components
+- [Getting Started](getting-started.md) - Quick introduction to Manifold
+- [Installation](guides/01-introduction/02-installation.md) - Setup instructions
+- [Quick Start Guide](guides/04-guides/01-quick-start-guide.md) - Run your first experiment
+- [About the Project](guides/01-introduction/01-about-the-project.md) - Project overview
 
-### Specialized Topics
-- **[COMPONENTS.md](COMPONENTS.md)** - Individual component specifications (embeddings, layers, integrators, optimizers)
-- **[CONFIGURATION.md](CONFIGURATION.md)** - YAML configuration reference and best practices
+### Core Concepts
 
-## 🚀 Quick Start
+- [Foundations](guides/02-concepts-core/00-foundations.md) - Mathematical foundations
+- [Physical Model](guides/02-concepts-core/01-physical-model.md) - Physics-inspired architecture
+- [Riemannian Geometry](guides/02-concepts-core/02-Riemannian-geometry.md) - Manifold theory
+- [Geodesic Flow](guides/02-concepts-core/03-geodetic-flow.md) - State evolution
+- [Dynamic Systems](guides/02-concepts-core/04-dynamic-systems.md) - System dynamics
 
-1. **For Researchers**: Start with [SCIENTIFIC_PAPER.md](SCIENTIFIC_PAPER.md)
-2. **For Developers**: Start with [API.md](API.md) and [TRAINING.md](TRAINING.md)
-3. **For Theory**: Start with [PHYSICS.md](PHYSICS.md) and [CONCEPTS.md](CONCEPTS.md)
+### Guides
 
-## 📊 Key Results
+- [Quick Start Guide](guides/04-guides/01-quick-start-guide.md) - Your first experiment
+- [Advanced Configuration](guides/04-guides/02-advanced-configuration.md) - Customizing behavior
+- [Problem Solving](guides/04-guides/03-problem-solving.md) - Troubleshooting guide
+- [Numeric Validation](guides/04-guides/04-numeric-validation.md) - Validation procedures
+- [Benchmarking](guides/04-guides/05-benchmarking.md) - Performance evaluation
 
-**Binary Parity Task (L=20 training)**:
-- **100% accuracy** on sequences up to L=1000 (50× extrapolation)
-- **O(1) memory**: 28-32MB VRAM regardless of sequence length
-- **Verified symplectic stability**: No gradient vanishing/explosion
+### Reference
 
-See [BENCHMARKS.md](BENCHMARKS.md) for complete results.
+- [API Classes](guides/03-reference/02-api-classes.md) - Complete API reference
+- [Constants](guides/03-reference/01-constants.md) - System constants
+- [Integrators](guides/03-reference/03-integrators.md) - Integration methods
+- [Geometries](guides/03-reference/04-geometries.md) - Geometry implementations
 
-## 📖 Additional Resources
+### Additional Resources
 
-- [Main Project README](../README.md) - Project overview and installation
-- [Contributing Guide](../CONTRIBUTING.md) - How to contribute
-- [Changelog](../CHANGELOG.md) - Version history
+- [Architecture Overview](ARCHITECTURE.md) - System architecture
+- [Implementation Guide](IMPLEMENTATION_GUIDE.md) - Detailed implementation
+- [Tutorial](tutorial.md) - Comprehensive tutorial
 
+## Key Features
 
+- **O(1) Inference Memory**: Constant memory regardless of sequence length
+- **Symplectic Integration**: Energy-preserving numerical methods
+- **Active Inference**: Uncertainty-aware dynamics adaptation
+- **Functional Embeddings**: Scalable vocabulary representations
+- **Geometric Stability**: Gradient stability over infinite horizons
 
-**Version**: 2.5.0 "Riemannian Stability"  
-**Last Updated**: January 18, 2026  
-**License**: Apache 2.0
+## Quick Links
+
+- [GitHub Repository](https://github.com/DepthMuun/gfn)
+- [Issues](https://github.com/DepthMuun/gfn/issues)
+
+---
+
+**Manifold Framework Documentation**

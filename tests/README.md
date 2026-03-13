@@ -1,36 +1,32 @@
-# MANIFOLD Professional Test Suite
+# DepthMuun GFN Test Suite
 
-This directory contains the verification suite for MANIFOLD (formerly GFN). All tests are unified and consistent with the V2 Architecture (Multi-Head Geodesic Flows).
+This directory contains the verification suite for the Geodesic Flow Networks (GFN) framework by **DepthMuun**. The suite is organized into three central pillars for maximum clarity and maintainability.
 
 ## Structure
 
-### 1. 🏗️ `unit/` (Component Logic)
-Tests individual classes in isolation.
-*   `test_components.py`: Verifies `Manifold`, `MLayer`, and `RiemannianGating` shapes and forward passes.
+### 1. 🧪 `unit/` (Atomic Logic)
+Tests individual classes and functions in isolation. Includes geometry checks, shape validation, and core mathematical primitives.
 
-### 2. ⚛️ `physics/` (Mathematical Correctness)
-Ensures the model adheres to physical laws (Conservation, Gradients).
+### 2. 🧩 `integration/` (System Flow)
+Ensures multiple components work together correctly. Includes full forward-backward passes, model-to-integrator wiring, and state state management.
 
-### 3. 🌐 `geometry/` (Metric Properties)
-Verifies Toroidal, Ricci, AdS/CFT and low-rank curvature mathematical consistency.
-
-### 4. 🧠 `functional/` (Behavioral Verification)
-**"Does it work as intended?"** - Emergent features like Curiosity exploration, Hysteresis memory, and Time Dilation.
-
-### 5. 🔌 `integration/` (System Stack)
-Tests the full system (vNext stack, training loops).
-
-### 6. 📊 `benchmarks/` (Performance & Metrics)
-Quantitative analysis of model capabilities and scaling.
+### 3. 🚀 `benchmarks/` (Performance & Convergence)
+Quantitative analysis of model capabilities, scaling limits, and long-term convergence properties (e.g., Matrix scaling, Stress tests).
 
 ## Usage
 
-Run all tests:
-```bash
-python tests/run_suite.py
-```
+The suite is managed via a professional orchestrator:
 
-Run specific benchmark:
 ```bash
-python tests/benchmarks/benchmark_performance.py
+# List test structure
+python tests/orchestrator.py --list
+
+# Run unit tests (Atomic)
+python tests/orchestrator.py --unit
+
+# Run integration tests (System)
+python tests/orchestrator.py --integration
+
+# Run benchmarks
+python tests/orchestrator.py --benchmarks
 ```

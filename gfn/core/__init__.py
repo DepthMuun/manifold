@@ -1,18 +1,7 @@
 """
-Core Models
-===========
-
-Main model implementations for GFN.
-
-Available Models:
-    - Manifold: Main GFN model with Riemannian geometry
-    - AdjointManifold: Adjoint variant for memory-efficient training
+core/__init__.py — GFN V5
 """
+from gfn.core.types import ManifoldState, Trajectory, StepResult, ModelOutput
+from gfn.core.state import ManifoldStateManager
 
-from .manifold import Manifold
-from .adjoint import AdjointManifold
-
-__all__ = [
-    'Manifold',
-    'AdjointManifold',
-]
+__all__ = ['ManifoldState', 'Trajectory', 'StepResult', 'ModelOutput', 'ManifoldStateManager']

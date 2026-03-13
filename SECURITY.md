@@ -1,4 +1,4 @@
-# Security Policy
+﻿# Security Policy
 
 ## Supported Versions
 
@@ -7,14 +7,13 @@ The Manifold project provides security updates for the following versions. Users
 | Version | Supported |
 |---------|-----------|
 | 2.6.x   | Yes       |
-| 2.5.x   | Support may be limited |
-| < 2.5   | No        |
+| <= 2.5   | No        |
 
 Security updates are prioritized for the latest minor version (2.6.x) and the most recent major version. Critical security patches may be backported to older versions when feasible, depending on the nature of the vulnerability and the scope of required changes.
 
 ## Reporting a Vulnerability
 
-The Manifold Laboratory takes security seriously and appreciates responsible disclosure of vulnerabilities. If you discover a security vulnerability in Manifold, please report it through our responsible disclosure process.
+The DepthMuun takes security seriously and appreciates responsible disclosure of vulnerabilities. If you discover a security vulnerability in Manifold, please report it through our responsible disclosure process.
 
 ### How to Report
 
@@ -68,7 +67,7 @@ If running Manifold as a service, apply appropriate network security controls in
 
 This security policy applies to the Manifold codebase and infrastructure. This includes:
 
-- The main Manifold repository at github.com/Manifold-Laboratory/manifold
+- The main Manifold repository at github.com/DepthMuun/gfn
 - Official documentation in the docs/ directory
 - The project website and any associated infrastructure
 - Official release artifacts and packages
@@ -79,7 +78,7 @@ This policy does not apply to third-party integrations, deployments, or applicat
 
 For security questions not related to vulnerability reporting, or for inquiries about security practices in Manifold deployments, please open an issue on GitHub with the "security" label.
 
-For sensitive security matters that should not be discussed publicly, please contact the Manifold Laboratory through GitHub's private vulnerability reporting feature.
+For sensitive security matters that should not be discussed publicly, please contact the DepthMuun through GitHub's private vulnerability reporting feature.
 
 ## Acknowledgments
 

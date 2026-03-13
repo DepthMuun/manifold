@@ -1,4 +1,4 @@
-# Contributing to Manifold
+﻿# Contributing to Manifold
 
 Thank you for your interest in contributing to Manifold! This document provides comprehensive guidelines and detailed instructions for contributing to the Geodesic Flow Networks project. Whether you are fixing bugs, adding new features, improving documentation, or proposing innovative ideas to extend the geometric sequence modeling capabilities, your contributions are warmly welcomed and deeply appreciated. This guide will walk you through the entire contribution process, from setting up your development environment to having your changes merged into the main repository.
 
@@ -20,7 +20,7 @@ First, navigate to the main Manifold repository page on GitHub and click the "Fo
 
 ```bash
 # Clone your forked repository
-git clone https://github.com/Manifold-Laboratory/manifold.git
+git clone https://github.com/DepthMuun/gfn.git
 cd manifold
 
 # Install in development mode with all dependencies
@@ -114,7 +114,7 @@ def compute_christoffel_symbols(g: torch.Tensor, dg: torch.Tensor) -> torch.Tens
     The Christoffel symbols are computed from the metric tensor g and
     its derivative dg using the formula:
     
-    Γ^k_ij = (1/2) g^kl (∂g_li/∂x^j + ∂g_lj/∂x^i - ∂g_ij/∂x^l)
+    Î“^k_ij = (1/2) g^kl (âˆ‚g_li/âˆ‚x^j + âˆ‚g_lj/âˆ‚x^i - âˆ‚g_ij/âˆ‚x^l)
     
     where g^kl is the inverse metric tensor.
     
@@ -123,7 +123,7 @@ def compute_christoffel_symbols(g: torch.Tensor, dg: torch.Tensor) -> torch.Tens
         dg: Derivative of metric tensor (..., d, d, d)
         
     Returns:
-        Christoffel symbols Γ^k_ij of shape (..., d, d, d)
+        Christoffel symbols Î“^k_ij of shape (..., d, d, d)
     """
     ...
 ```
@@ -323,7 +323,7 @@ Ask clarifying questions when something is unclear rather than making assumption
 
 All contributions to Manifold are recognized and appreciated, regardless of their size or scope. Contributors are acknowledged in release notes and, with their permission, in the project's contributor list that appears in documentation and on the project website.
 
-Significant contributions may be highlighted in blog posts or other communications from the Manifold Laboratory. This includes major feature implementations, significant bug fixes, substantial documentation improvements, and other contributions that have a meaningful impact on the project.
+Significant contributions may be highlighted in blog posts or other communications from the DepthMuun. This includes major feature implementations, significant bug fixes, substantial documentation improvements, and other contributions that have a meaningful impact on the project.
 
 ## 7. Additional Resources
 
@@ -353,7 +353,7 @@ For urgent issues or sensitive topics, you may contact the project maintainers d
 
 Thank you for considering contributing to Manifold! Your contributions help advance the field of geometric sequence modeling and make powerful tools accessible to researchers and practitioners worldwide. Every contribution, whether it is a bug fix, a new feature, documentation improvement, or a feature suggestion, helps make Manifold a better project for everyone.
 
-The Manifold Laboratory team and the community of contributors look forward to your contributions and are committed to supporting you throughout the contribution process. Welcome to the community!
+The DepthMuun team and the community of contributors look forward to your contributions and are committed to supporting you throughout the contribution process. Welcome to the community!
 
 ---
 

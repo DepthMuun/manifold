@@ -1,8 +1,8 @@
-# Authors and Contributors
+﻿# Authors and Contributors
 
 ## Project Creator
 
-**Joaquín Stürtz** (Manifold Laboratory) is the primary creator and architect of Manifold and Geodesic Flow Networks. The laboratory focuses on advancing the field of geometric intelligence through the application of physical principles to machine learning architectures.
+**Joaquín Stürtz** (DepthMuun) is the primary creator and architect of Manifold and Geodesic Flow Networks. The laboratory focuses on advancing the field of geometric intelligence through the application of physical principles to machine learning architectures.
 
 For inquiries about the project, please contact Joaquín Stürtz through the official GitHub repository.
 
@@ -10,7 +10,7 @@ For inquiries about the project, please contact Joaquín Stürtz through the off
 
 ### Project Lead
 
-**Joaquín Stürtz** is the project lead, responsible for the overall direction, architecture decisions, and quality standards of the Manifold project. This role encompasses technical leadership, community management, and strategic planning for the project's development roadmap.
+**Joaquí­n Stúrtz** is the project lead, responsible for the overall direction, architecture decisions, and quality standards of the Manifold project. This role encompasses technical leadership, community management, and strategic planning for the project's development roadmap.
 
 ### Core Contributors
 
@@ -61,7 +61,7 @@ Contributors are attributed in the following ways:
 - **Commit History**: All contributions are recorded in the Git commit history, preserving the authorship of each change.
 - **Release Notes**: Significant contributions are highlighted in release notes accompanying new versions.
 - **Documentation**: Major contributors may be mentioned in relevant documentation sections.
-- **Communication**: With permission, contributors may be featured in blog posts, presentations, and other communications from the Manifold Laboratory.
+- **Communication**: With permission, contributors may be featured in blog posts, presentations, and other communications from the DepthMuun.
 
 ## Contributing to Manifold
 

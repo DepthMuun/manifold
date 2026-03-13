@@ -1,38 +1,27 @@
 """
-Losses
-======
-
-Physics-informed loss functions for stable geodesic training.
-
-Available Losses:
-    - hamiltonian_loss: Energy conservation
-    - geodesic_regularization: Curvature smoothness
-    - kinetic_energy_penalty: Velocity regularization
-    - noether_loss: Semantic symmetry enforcement
-    - curiosity_loss: Entropy-driven exploration
-    - GFNLoss: Combined loss (main)
+gfn/losses/__init__.py
+Public API del módulo losses — GFN V5
 """
 
-from .hamiltonian import hamiltonian_loss
-from .geodesic import geodesic_regularization
-from .kinetic import kinetic_energy_penalty
-from .noether import noether_loss
-from .curiosity import curiosity_loss
-from .combined import GFNLoss
-
-# Topology-specific losses
-from .circular import circular_distance_loss, CircularDistanceLoss
-from .toroidal import toroidal_distance_loss, ToroidalDistanceLoss
+from gfn.losses.base import BaseLoss
+from gfn.losses.factory import LossFactory
+from gfn.losses.generative import ManifoldGenerativeLoss
+from gfn.losses.physics import PhysicsLoss, PhysicsInformedLoss
+from gfn.losses.toroidal import ToroidalLoss, ToroidalVelocityLoss, ToroidalDistanceLoss
+from gfn.losses.regularization import NoetherSymmetryLoss, DynamicLossBalancer
+from gfn.losses.detection import GIoULoss, IoULoss, giou_loss, iou_loss
 
 __all__ = [
-    'hamiltonian_loss',
-    'geodesic_regularization',
-    'kinetic_energy_penalty',
-    'noether_loss',
-    'curiosity_loss',
-    'GFNLoss',
-    'circular_distance_loss',
-    'CircularDistanceLoss',
-    'toroidal_distance_loss',
-    'ToroidalDistanceLoss',
+    "BaseLoss",
+    "LossFactory",
+    "ManifoldGenerativeLoss",
+    "PhysicsLoss",
+    "PhysicsInformedLoss",
+    "ToroidalLoss",
+    "ToroidalVelocityLoss",
+    "ToroidalDistanceLoss",
+    "NoetherSymmetryLoss",
+    "DynamicLossBalancer",
+    # Detection
+    "GIoULoss", "IoULoss", "giou_loss", "iou_loss",
 ]

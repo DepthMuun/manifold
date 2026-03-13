@@ -1,112 +1,106 @@
 """
-GFN: Geodesic Flow Networks
-===========================
-
-A novel neural architecture that models sequences as flows on Riemannian manifolds.
-
-Available Integrators:
-    - HeunIntegrator: 2nd order, fast (RECOMMENDED)
-    - RK4Integrator: 4th order, accurate but slower
-    - SymplecticIntegrator: Velocity Verlet, energy-preserving
-    - LeapfrogIntegrator: Störmer-Verlet, best symplectic
-
-Usage:
-    from gfn import GFN
-    model = GFN(vocab_size=16, dim=512, depth=12, rank=128, integrator_type='heun')
-    
-    # Physics-informed training:
-    from gfn import GFNLoss, RiemannianAdam
-    criterion = GFNLoss(lambda_h=0.01)
-    optimizer = RiemannianAdam(model.parameters(), lr=1e-3)
+GFN (Geodesic Flow Network) V5
+==============================
+API pública del paquete — compatibilidad con benchmarks y código legado.
 """
 
-__version__ = "2.5.0"
-__author__ = "Manifold Laboratory (Joaquín Stürtz)"
+# ── Modelos ───────────────────────────────────────────────────────────────────
+from gfn.models.manifold import ManifoldModel as Manifold
+from gfn.models.manifold import ManifoldModel as Model
+from gfn.models.manifold_layer import ManifoldLayer, ManifoldLayer as MLayer
 
-# Core Models (from core/ package)
-from .core import Manifold as GFN  # Alias for backward compatibility
-from .core import Manifold, AdjointManifold
-# Legacy aliases
-AdjointGFN = AdjointManifold
-
-# Model Components (from model/ package)
-from .model.state import ManifoldState
-from .model.fusion import CUDAFusionManager
-
-# Layers
-from .layers import MLayer as GLayer  # Alias
-from .layers import MLayer, ParallelMLayer, RiemannianGating
-
-# Geometry
-from .geometry import LowRankChristoffel
-
-# Integrators
-from .integrators import (
-    HeunIntegrator,
-    RK4Integrator,
-    SymplecticIntegrator,
-    LeapfrogIntegrator,
-    YoshidaIntegrator,
-    DormandPrinceIntegrator,
-    EulerIntegrator,
-    ForestRuthIntegrator,
-    OmelyanIntegrator,
-    CouplingFlowIntegrator,
-    NeuralIntegrator,
+# ── Configuración ─────────────────────────────────────────────────────────────
+from gfn.config.schema import (
+    ManifoldConfig, PhysicsConfig, TopologyConfig, StabilityConfig,
+    ActiveInferenceConfig, EmbeddingConfig, ReadoutConfig, DynamicTimeConfig,
+    MixtureConfig, DynamicsConfig, FractalConfig, SingularityConfig, HysteresisConfig
 )
 
-# Readouts
-from .readouts import ImplicitReadout
+# ── Integradores ──────────────────────────────────────────────────────────────
+from gfn.physics.integrators.symplectic.leapfrog import LeapfrogIntegrator  as Leapfrog
+from gfn.physics.integrators.runge_kutta.heun    import HeunIntegrator      as Heun
+from gfn.physics.integrators.symplectic.yoshida  import YoshidaIntegrator   as Yoshida
+from gfn.physics.integrators.symplectic.verlet   import VerletIntegrator    as Verlet
+from gfn.physics.integrators.runge_kutta.rk4     import RK4Integrator       as RK4
 
-# Loss Functions
-from .losses import (
-    hamiltonian_loss,
-    geodesic_regularization,
-    GFNLoss,
+# ── Geometría ─────────────────────────────────────────────────────────────────
+from gfn.geometry.torus    import ToroidalRiemannianGeometry
+from gfn.geometry.low_rank import LowRankRiemannianGeometry  as LowRankChristoffel
+from gfn.geometry.reactive import ReactiveRiemannianGeometry as ReactiveChristoffel
+
+# ── Física: Dynamics ──────────────────────────────────────────────────────────
+from gfn.physics.dynamics import (
+    get_dynamics, BaseDynamics,
+    DirectDynamics, ResidualDynamics, MixDynamics, GatedDynamics, StochasticDynamics
 )
 
-# Optimizers
-from .optimizers import (
-    RiemannianAdam,
-    ManifoldSGD,
+# ── Física: Normalization y Gating ────────────────────────────────────────────
+from gfn.physics.normalization import ManifoldNormalizationRegistry
+from gfn.physics.gating import RiemannianGating, ThermodynamicLayer, FrictionGate
+from gfn.physics.hamiltonian import HamiltonianTrajectorySolver
+from gfn.physics.monitor import PhysicsMonitorPlugin
+
+# ── Aggregators ───────────────────────────────────────────────────────────────
+from gfn.models.components.pooling import (
+    HamiltonianPooling, HierarchicalAggregator, MomentumAggregator
 )
 
-# Datasets
-from .datasets import MathDataset, MixedHFDataset
+# ── Optimizadores ─────────────────────────────────────────────────────────────
+from gfn.training.optimizer import RiemannianAdam, RiemannianSGD, ManifoldSGD
 
-# Utilities
-from .utils import parallel_scan, GPUMonitor
+# ── Evaluación ────────────────────────────────────────────────────────────────
+from gfn.training.evaluation import ManifoldMetricEvaluator, PhysicsConstraintEvaluator
 
-# Registry
-# Registry
-INTEGRATORS = {
-    'euler': EulerIntegrator,
-    'heun': HeunIntegrator,
-    'rk4': RK4Integrator,
-    'rk45': DormandPrinceIntegrator, # Alias for DP
-    'symplectic': SymplecticIntegrator,
-    'leapfrog': LeapfrogIntegrator,
-    'yoshida': YoshidaIntegrator,
-    'forest_ruth': ForestRuthIntegrator,
-    'omelyan': OmelyanIntegrator,
-    'coupling': CouplingFlowIntegrator,
-    'neural': NeuralIntegrator,
-}
 
+# ── API Clean — create / loss / load / benchmark ──────────────────────────────
+from gfn.api import create, loss, save, load, benchmark, Trainer
+
+# ── Losses — Detection ────────────────────────────────────────────────────────
+from gfn.losses.detection import GIoULoss, IoULoss, giou_loss, iou_loss
+
+# ── Utils — Coords ────────────────────────────────────────────────────────────
+from gfn.utils.coords import box_to_torus, torus_to_box, wrap_angles, angle_to_unit
+
+# ── Training — Optimizer utils ────────────────────────────────────────────────
+from gfn.training.optimizer import make_gfn_optimizer, all_parameters
+
+# ── Training — Checkpoint ─────────────────────────────────────────────────────
+from gfn.training.checkpoint import save_checkpoint, load_checkpoint
+
+
+# ── __all__ ───────────────────────────────────────────────────────────────────
 __all__ = [
-    "GFN",
-    "Manifold",  # Export base class
-    "ManifoldState",  # State management
-    "CUDAFusionManager",  # CUDA fusion
-    "GLayer", "RiemannianGating",
-    "LowRankChristoffel", 
-    "HeunIntegrator", "RK4Integrator", "SymplecticIntegrator", "LeapfrogIntegrator", 
-    "YoshidaIntegrator", "DormandPrinceIntegrator", "EulerIntegrator",
-    "ForestRuthIntegrator", "OmelyanIntegrator", "CouplingFlowIntegrator", "NeuralIntegrator",
-    "INTEGRATORS",
-    "ImplicitReadout",
-    "hamiltonian_loss", "geodesic_regularization", "GFNLoss",
-    "RiemannianAdam", "ManifoldSGD",
-    "MathDataset", "MixedHFDataset",
-    "GPUMonitor",
+    # Modelos
+    'Manifold', 'Model', 'ManifoldLayer', 'MLayer',
+    # Configuración
+    'ManifoldConfig', 'PhysicsConfig', 'TopologyConfig', 'StabilityConfig',
+    'ActiveInferenceConfig', 'EmbeddingConfig', 'ReadoutConfig', 'DynamicTimeConfig',
+    'MixtureConfig', 'DynamicsConfig', 'FractalConfig', 'SingularityConfig', 'HysteresisConfig',
+    # Integradores
+    'Leapfrog', 'Heun', 'Yoshida', 'Verlet', 'RK4',
+    # Geometría
+    'ToroidalRiemannianGeometry', 'LowRankChristoffel', 'ReactiveChristoffel',
+    # Dynamics
+    'get_dynamics', 'BaseDynamics',
+    'DirectDynamics', 'ResidualDynamics', 'MixDynamics', 'GatedDynamics', 'StochasticDynamics',
+    # Física
+    'ManifoldNormalizationRegistry',
+    'RiemannianGating', 'ThermodynamicLayer', 'FrictionGate',
+    'HamiltonianTrajectorySolver',
+    'PhysicsMonitorPlugin',
+    # Aggregators
+    'HamiltonianPooling', 'HierarchicalAggregator', 'MomentumAggregator',
+    # Optimizadores
+    'RiemannianAdam',
+    'make_gfn_optimizer', 'all_parameters',
+    # Evaluación
+    'ManifoldMetricEvaluator', 'PhysicsConstraintEvaluator',
+    # Losses — Detection
+    'GIoULoss', 'IoULoss', 'giou_loss', 'iou_loss',
+    # Utils — Coords
+    'box_to_torus', 'torus_to_box', 'wrap_angles', 'angle_to_unit',
+    # Training — Checkpoint
+    'save_checkpoint', 'load_checkpoint',
+    # API Clean
+    'create', 'loss', 'save', 'load', 'benchmark', 'Trainer',
 ]

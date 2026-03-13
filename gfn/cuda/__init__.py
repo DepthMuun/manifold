@@ -1,12 +1,11 @@
 """
-GFN CUDA Kernels
-================
-Custom fused CUDA kernels for critical GFN operations.
-
-Provides significant speedups by eliminating kernel launch overhead
-and intermediate memory traffic.
+gfn/cuda/__init__.py
+Infraestructura CUDA para GFN V5.
 """
+import torch
 
-from .ops import christoffel_fused, leapfrog_fused, recurrent_manifold_fused
+CUDA_AVAILABLE = torch.cuda.is_available()
 
-__all__ = ['christoffel_fused', 'leapfrog_fused', 'recurrent_manifold_fused', 'euler_fused', 'heun_fused', 'rk4_fused', 'verlet_fused']
+def is_cuda_active(tensor: torch.Tensor) -> bool:
+    """Verifica si CUDA está disponible y el tensor está en un dispositivo GPU."""
+    return CUDA_AVAILABLE and tensor.is_cuda

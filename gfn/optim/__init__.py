@@ -1,6 +1,10 @@
-from ..optimizers import RiemannianAdam, ManifoldSGD
+"""
+GFN V5 Optimizer Compatibility Shim
+Migrated to gfn.training.optimizer
+"""
+from gfn.training.optimizer import RiemannianAdam, RiemannianSGD, ManifoldSGD
 
-__all__ = [
-    "RiemannianAdam",
-    "ManifoldSGD",
-]
+Adam = RiemannianAdam
+SGD = ManifoldSGD
+
+__all__ = ["Adam", "SGD", "RiemannianAdam", "ManifoldSGD"]

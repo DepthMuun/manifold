@@ -1,133 +1,109 @@
+"""
+ReactiveRiemannianGeometry — GFN V5
+Active-inference geometry: curvature reacts to system state.
+Migrated from gfn/geo/physical/reactive_field_geometry.py
+"""
+
 import torch
 import torch.nn as nn
-from ..constants import CURVATURE_CLAMP
-from .lowrank import LowRankChristoffel
+from typing import Optional, Union, Tuple, Dict, Any
+
+from gfn.constants import CURVATURE_CLAMP, EPS, DEFAULT_PLASTICITY, TOPOLOGY_TORUS
+from gfn.config.schema import PhysicsConfig
+from gfn.geometry.low_rank import LowRankRiemannianGeometry
+from gfn.registry import register_geometry
+
+# Default constants
+SINGULARITY_THRESHOLD = 0.5
+BLACK_HOLE_STRENGTH = 3.0
+SINGULARITY_GATE_SLOPE = 10.0
 
 
-class ReactiveChristoffel(LowRankChristoffel):
+@register_geometry('reactive')
+class ReactiveRiemannianGeometry(LowRankRiemannianGeometry):
     """
-    Active Inference: Geometry that reacts to the system's state.
+    Geometry that reacts to the system's own state via active inference.
 
-    IMPORTANT NOTES FROM AUDITORIA LOGICA (2026-02-06):
-    
-    1. TERMINOLOGY CLARIFICATION:
-       - "Singularities" are NOT true mathematical singularities
-       - They are CURVATURE AMPLIFICATION regions where the model
-         increases geometric "resistance" to capture high-confidence states
-       - "Black hole strength" = curvature_amplification_factor
-       - "Singularity threshold" = semantic_certainty_threshold
-    
-    2. PHYSICS INTERPRETATION:
-       The amplification factor artificially multiplies Christoffel symbols
-       based on semantic potential. This does NOT correspond to any physical
-       manifold property. It's a regularization/attention mechanism.
-    
-    3. GRADIENT FLOW:
-       Uses soft-sigmoid for differentiability: sigma(10 * (potential - threshold))
-       This creates smooth transitions instead of hard thresholds.
-    
-    Features:
-    1. Reactive Curvature (Plasticity): Metric deforms based on kinetic energy.
-       High energy (confusion/exploration) -> Higher curvature (more braking).
-       
-    2. Logical Singularities: If 'V(x)' (potential) exceeds a threshold, 
-       we trigger a 'Curvature Amplification' to emphasize semantic certainty.
-       NOT a true singularity - just controlled amplification.
-    
-    Gradient Notes:
-    The singularity gate uses soft-sigmoid (slope * (potential - threshold))
-    to maintain differentiability. This creates a smooth transition rather
-    than a hard threshold, allowing gradients to flow through amplification regions.
-    
-    Args:
-        dim: Manifold dimension
-        rank: Low-rank approximation rank
-        physics_config: Configuration dict with active_inference settings
+    Enhancements over LowRank:
+    1. Plasticity: Christoffel symbols scaled by kinetic energy (curv. amplification ≈ attention).
+    2. Singularities: Soft curvature amplification near semantic attractors.
+
+    Note: These are regularization/attention mechanisms, NOT physical manifold properties.
     """
-    def __init__(self, dim, rank=16, physics_config=None):
-        super().__init__(dim, rank, physics_config=physics_config)
-        self.config = physics_config or {}
-        self.active_cfg = self.config.get('active_inference', {})
-        
-        self.plasticity = self.active_cfg.get('reactive_curvature', {}).get('plasticity', 0.0)
-        
-        # AUDIT FIX: Renamed for clarity
-        self.semantic_certainty_threshold = self.active_cfg.get('singularities', {}).get('threshold', 0.8)
-        self.curvature_amplification_factor = self.active_cfg.get('singularities', {}).get('strength', 10.0)
 
-    def forward(self, v, x=None, force=None, **kwargs):
-        # Try CUDA path with Reactive Dynamics
-        try:
-            from gfn.cuda.ops import christoffel_fused, CUDA_AVAILABLE
-            if CUDA_AVAILABLE and v.is_cuda:
-                # Extract Reactive Dynamics parameters
-                x_in = x if x is not None else torch.empty(0, device=v.device)
-                
-                # Singularities require V_w  
-                sing_cfg = self.active_cfg.get('singularities', {})
-                if sing_cfg.get('enabled', False) and x is not None:
-                    V_w_in = self.V.weight.t()  # [1, dim] -> [dim, 1] -> [1, dim]
-                else:
-                    V_w_in = torch.empty(0, device=v.device)
-                
-                # Plasticity
-                react_cfg = self.active_cfg.get('reactive_curvature', {})
-                plasticity = self.plasticity if react_cfg.get('enabled', False) else 0.0
-                
-                # AUDIT FIX: Use renamed parameters
-                sing_thresh = sing_cfg.get('threshold', 0.9) if sing_cfg.get('enabled', False) else 1.0
-                sing_strength = sing_cfg.get('strength', 1.0) if sing_cfg.get('enabled', False) else 1.0
-                
-                return christoffel_fused(v, self.U, self.W, x_in, V_w_in, plasticity, sing_thresh, sing_strength)
-        except Exception as e:
-            print(f"[GFN:WARN] CUDA christoffel_fused failed: {e}, falling back to PyTorch")
-            # Fall through to PyTorch implementation
+    def __init__(self, dim: int, rank: int = 16, num_heads: int = 1,
+                 config: Optional[PhysicsConfig] = None):
+        super().__init__(dim, rank, num_heads=num_heads, config=config)
+        self.return_friction_separately = True
 
-        # Fallback PyTorch: Base curvature (static memory or PyTorch fallback)
-        gamma = super().forward(v, x, force=force, **kwargs)
-        
-        if not self.active_cfg.get('enabled', False):
-            return gamma
-            
-        # 1. Reactive Curvature (Plasticity)
-        if self.active_cfg.get('reactive_curvature', {}).get('enabled', False):
-            # Energy = Kinetic Energy of thoughts (~ v^2)
-            # Use tanh to bound the reaction
+        self.active_cfg = self.config.active_inference
+        self.plasticity = getattr(self.active_cfg, 'plasticity', DEFAULT_PLASTICITY)
+
+        sing_cfg = self.config.singularities
+        sing_enabled = getattr(sing_cfg, 'enabled', False)
+
+        if sing_enabled:
+            self.semantic_certainty_threshold = getattr(sing_cfg, 'threshold', SINGULARITY_THRESHOLD)
+            self.curvature_amplification_factor = getattr(sing_cfg, 'strength', BLACK_HOLE_STRENGTH)
+            gate_input_dim = dim * 2 if self.topology == TOPOLOGY_TORUS else dim
+            if num_heads > 1:
+                self.V_weight = nn.Parameter(torch.zeros(num_heads, gate_input_dim, 1))
+            else:
+                self.V = nn.Linear(gate_input_dim, 1)
+                nn.init.zeros_(self.V.weight)
+                nn.init.constant_(self.V.bias, -2.0)  # Start gate closed
+        else:
+            self.semantic_certainty_threshold = SINGULARITY_THRESHOLD
+            self.curvature_amplification_factor = BLACK_HOLE_STRENGTH
+            self.V = None
+
+    def _get_potential(self, x_in: torch.Tensor) -> Optional[torch.Tensor]:
+        """Compute singularity potential, returns None if disabled."""
+        if not getattr(self.config.singularities, 'enabled', False):
+            return None
+        if self.num_heads > 1:
+            return torch.sigmoid(torch.matmul(x_in.unsqueeze(-2), self.V_weight).squeeze(-2))
+        elif self.V is not None:
+            return torch.sigmoid(self.V(x_in))
+        return None
+
+    def forward(self, x: torch.Tensor, v: Optional[torch.Tensor] = None,
+                force: Optional[torch.Tensor] = None, **kwargs) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if v is None:
+            return torch.zeros_like(x)
+
+        # 1. Base curvature from LowRank
+        res = super().forward(x, v, force=force, **kwargs)
+        if isinstance(res, tuple):
+            gamma, mu = res
+        else:
+            gamma, mu = res, torch.zeros_like(v) if v is not None else torch.zeros_like(x)
+
+        if not self.active_cfg.enabled:
+            if self.return_friction_separately:
+                return gamma, mu
+            return gamma + mu * v if v is not None else gamma
+
+        # 2. Plasticity: scale curvature by kinetic energy
+        react_cfg = self.active_cfg.reactive_curvature
+        react_enabled = react_cfg.get('enabled', False) if isinstance(react_cfg, dict) else False
+        if react_enabled and self.plasticity > 0.0:
             energy = torch.tanh(v.pow(2).mean(dim=-1, keepdim=True))
-            # If energy is high, increase curvature (slow down/turn harder)
-            # Gamma_new = Gamma * (1 + alpha * energy)
             gamma = gamma * (1.0 + self.plasticity * energy)
 
-        # 2. AUDIT FIX: Curvature Amplification (formerly "Singularities")
-        # This is NOT a true mathematical singularity
-        # It amplifies curvature for high-semantic-certainty regions
-        if self.active_cfg.get('singularities', {}).get('enabled', False) and x is not None:
-            # Check Semantic Potential V(x)
-            if self.is_torus:
-                 x_in = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
-            else:
-                 x_in = x
-            potential = torch.sigmoid(self.V(x_in)) # [batch, 1]
-            
-            # AUDIT FIX: Document what we're doing
-            """
-            We amplify curvature where semantic potential exceeds threshold.
-            This is NOT a true singularity - it's a learned attention mechanism
-            that makes the model "pay more attention" to high-certainty regions
-            by increasing geometric resistance.
-            
-            The amplification is smooth (differentiable) via soft-sigmoid.
-            """
-            
-            # Soft amplification using sigmoid with configurable slope
-            gate_slope = self.active_cfg.get('singularities', {}).get('gate_slope', 10.0)
-            is_amplified = torch.sigmoid(gate_slope * (potential - self.semantic_certainty_threshold))
-            amplification_mult = 1.0 + is_amplified * (self.curvature_amplification_factor - 1.0)
-            gamma = gamma * amplification_mult
-            
-            # AUDIT FIX: Add safety constraint
-            # Ensure amplification doesn't cause numerical instability
-            max_amplification = self.curvature_amplification_factor
-            gamma = torch.clamp(gamma, -max_amplification * CURVATURE_CLAMP, max_amplification * CURVATURE_CLAMP)
+        # 3. Singularity amplification
+        if getattr(self.config.singularities, 'enabled', False) and x is not None:
+            x_in = torch.cat([torch.sin(x), torch.cos(x)], dim=-1) if self.topology == TOPOLOGY_TORUS else x
+            potential = self._get_potential(x_in)
+            if potential is not None:
+                gate_slope = getattr(self.config.singularities, 'gate_slope', SINGULARITY_GATE_SLOPE)
+                is_amplified = torch.sigmoid(gate_slope * (potential - self.semantic_certainty_threshold))
+                amp = 1.0 + is_amplified * (self.curvature_amplification_factor - 1.0)
+                gamma = gamma * amp
+                limit = self.curvature_amplification_factor * CURVATURE_CLAMP
+                gamma = limit * torch.tanh(gamma / limit)
 
-        return gamma
+        if self.return_friction_separately:
+            return gamma, mu
+
+        return gamma + mu * v if v is not None else gamma
